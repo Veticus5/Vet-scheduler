@@ -1,0 +1,19 @@
+{
+  "name": "@vet/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "embed-ui": "bun run scripts/embed-ui.ts",
+    "build:exe": "bun run embed-ui && bun build --compile --minify --outfile ../dist/vet-scheduler.exe src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@vet/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

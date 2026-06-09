@@ -1,0 +1,19 @@
+{
+  "name": "vet-scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-assisted scheduling app for a veterinary clinic (local web app)",
+  "workspaces": [
+    "shared",
+    "server",
+    "ui"
+  ],
+  "scripts": {
+    "dev:server": "bun run --cwd server dev",
+    "dev:ui": "bun run --cwd ui dev",
+    "build:ui": "bun run --cwd ui build",
+    "build:exe": "bun run build:ui && bun run --cwd server build:exe",
+    "start": "bun run --cwd server start",
+    "test": "bun test"
+  }
+}
