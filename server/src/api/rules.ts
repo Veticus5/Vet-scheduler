@@ -7,6 +7,7 @@ import {
   setRuleEnabled,
   updateRule,
 } from "../repos/rules";
+import { draftRulesFromText } from "../ai/draft-rules";
 import type { Route } from "./index";
 
 const VALID_KINDS: RuleKind[] = [
@@ -40,6 +41,19 @@ export const ruleRoutes: Route[] = [
     method: "POST",
     path: "/rules",
     handler: async (req) => json(createRule(validate(await readJson(req))), 201),
+  },
+  {
+    // Draft rules from a free-form description via AI. Returns RuleInput[] for
+    // the user to review — never writes to the database.
+    method: "POST",
+    path: "/rules/draft-from-text",
+    handler: async (req) => {
+      const body = await readJson<{ text?: string }>(req);
+      if (typeof body?.text !== "string" || !body.text.trim()) {
+        throw new HttpError(400, "Podaj opis reguły do przekształcenia.");
+      }
+      return json(await draftRulesFromText(body.text));
+    },
   },
   {
     method: "PUT",

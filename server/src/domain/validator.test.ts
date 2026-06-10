@@ -1,15 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import type { Employee, Rule, ShiftDefinition, ScheduleRequest, Assignment } from "@vet/shared";
+import type { Employee, Rule, ShiftDefinition, ScheduleRequest, Assignment, StaffGroupKey } from "@vet/shared";
+import { QUALIFICATION_TIERS } from "@vet/shared";
 import { validate, type ValidationContext } from "./validator";
 
 // ---- builders ------------------------------------------------------------
+
+// Tier ranks for every group, mirroring what the qualifications repo provides.
+const TIER_RANKS = new Map<StaffGroupKey, Map<string, number>>(
+  (Object.keys(QUALIFICATION_TIERS) as StaffGroupKey[]).map((g) => [
+    g,
+    new Map(QUALIFICATION_TIERS[g].map((t) => [t.key, t.rank])),
+  ]),
+);
 
 function emp(id: string, over: Partial<Employee> = {}): Employee {
   return {
     id,
     name: id,
     staffGroup: "reception",
-    qualificationLevel: 1,
+    qualificationTier: "niedoswiadczony",
     contractHours: 160,
     defaultAvailability: {},
     active: true,
@@ -28,6 +37,7 @@ function shift(id: string, min: number, max: number, over: Partial<ShiftDefiniti
     weekdays: [0, 1, 2, 3, 4, 5, 6],
     requiredMin: min,
     requiredMax: max,
+    staffsReception: true,
     ...over,
   };
 }
@@ -40,6 +50,7 @@ function ctx(over: Partial<ValidationContext>): ValidationContext {
     rules: [],
     requests: [],
     assignments: [],
+    tierRanks: TIER_RANKS,
     ...over,
   };
 }
@@ -71,6 +82,80 @@ describe("coverage", () => {
     );
     // The 2026-07-01 instance has 2 (within 2–4) → no coverage violation for that date.
     expect(res.violations.some((v) => v.kind === "coverage" && v.date === "2026-07-01")).toBe(false);
+  });
+});
+
+// ---- office duty (staffsReception=false) ---------------------------------
+
+describe("office duty", () => {
+  test("office-duty assignment does not fill reception-desk coverage", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [
+          shift("desk", 1, 1, { weekdays: [3] }),
+          shift("office", 1, 1, { weekdays: [3], staffsReception: false }),
+        ],
+        // e1 is on office duty only — the desk stays unstaffed.
+        assignments: [A("2026-07-01", "office", "e1")],
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "coverage" && v.shiftDefId === "desk")).toBe(true);
+    // The office shift itself is never coverage-checked.
+    expect(res.violations.some((v) => v.kind === "coverage" && v.shiftDefId === "office")).toBe(false);
+  });
+
+  test("qualification-coverage ignores employees on office duty", () => {
+    const rule: Rule = {
+      id: "rq",
+      name: "Min 1 zastępca/kierownik",
+      kind: "qualification-coverage",
+      hard: true,
+      scope: { type: "group", group: "reception" },
+      params: { kind: "qualification-coverage", minQualificationLevel: 3, minCount: 1 },
+      description: "",
+      enabled: true,
+    };
+    const res = validate(
+      ctx({
+        employees: [
+          emp("junior", { qualificationTier: "niedoswiadczony" }),
+          emp("boss", { qualificationTier: "kierownik" }),
+        ],
+        shiftDefs: [
+          shift("desk", 0, 5, { weekdays: [3] }),
+          shift("office", 0, 5, { weekdays: [3], staffsReception: false }),
+        ],
+        rules: [rule],
+        // Boss is on office duty, only a junior is on the desk → desk unqualified.
+        assignments: [A("2026-07-01", "desk", "junior"), A("2026-07-01", "office", "boss")],
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "qualification-coverage")).toBe(true);
+  });
+
+  test("office duty counts toward consecutive-days limit", () => {
+    const rule: Rule = {
+      id: "rc",
+      name: "Max 7 dni",
+      kind: "max-consecutive-days",
+      hard: true,
+      scope: { type: "group", group: "reception" },
+      params: { kind: "max-consecutive-days", maxDays: 7 },
+      description: "",
+      enabled: true,
+    };
+    // 8 consecutive office-duty days — still 8 worked days in a row.
+    const assignments = Array.from({ length: 8 }, (_, i) => A(`2026-07-0${i + 1}`, "office", "e1"));
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [shift("office", 0, 5, { staffsReception: false })],
+        rules: [rule],
+        assignments,
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "max-consecutive-days")).toBe(true);
   });
 });
 
@@ -130,7 +215,7 @@ describe("qualification-coverage", () => {
   test("no qualified employee is a violation", () => {
     const res = validate(
       ctx({
-        employees: [emp("junior", { qualificationLevel: 1 })],
+        employees: [emp("junior", { qualificationTier: "niedoswiadczony" })],
         shiftDefs: [shift("s", 0, 5, { weekdays: [3] })],
         rules: [rule],
         assignments: [A("2026-07-01", "s", "junior")],
@@ -142,7 +227,7 @@ describe("qualification-coverage", () => {
   test("soft variant reports a preference, not a violation", () => {
     const res = validate(
       ctx({
-        employees: [emp("junior", { qualificationLevel: 1 })],
+        employees: [emp("junior", { qualificationTier: "niedoswiadczony" })],
         shiftDefs: [shift("s", 0, 5, { weekdays: [3] })],
         rules: [{ ...rule, hard: false }],
         assignments: [A("2026-07-01", "s", "junior")],

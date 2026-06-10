@@ -12,6 +12,7 @@ interface Row {
   weekdays: string;
   required_min: number;
   required_max: number;
+  staffs_reception: number;
 }
 
 function toShift(r: Row): ShiftDefinition {
@@ -24,6 +25,7 @@ function toShift(r: Row): ShiftDefinition {
     weekdays: JSON.parse(r.weekdays),
     requiredMin: r.required_min,
     requiredMax: r.required_max,
+    staffsReception: r.staffs_reception !== 0,
   };
 }
 
@@ -43,8 +45,8 @@ export function createShift(input: ShiftDefinitionInput): ShiftDefinition {
   const id = newId();
   getDb()
     .query(
-      `INSERT INTO shift_definitions (id, staff_group, name, start_time, end_time, weekdays, required_min, required_max)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO shift_definitions (id, staff_group, name, start_time, end_time, weekdays, required_min, required_max, staffs_reception)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -55,6 +57,7 @@ export function createShift(input: ShiftDefinitionInput): ShiftDefinition {
       JSON.stringify(input.weekdays ?? []),
       input.requiredMin,
       input.requiredMax,
+      input.staffsReception === false ? 0 : 1,
     );
   return getShift(id)!;
 }
@@ -63,7 +66,7 @@ export function updateShift(id: string, input: ShiftDefinitionInput): ShiftDefin
   if (!getShift(id)) return null;
   getDb()
     .query(
-      `UPDATE shift_definitions SET staff_group = ?, name = ?, start_time = ?, end_time = ?, weekdays = ?, required_min = ?, required_max = ?
+      `UPDATE shift_definitions SET staff_group = ?, name = ?, start_time = ?, end_time = ?, weekdays = ?, required_min = ?, required_max = ?, staffs_reception = ?
        WHERE id = ?`,
     )
     .run(
@@ -74,6 +77,7 @@ export function updateShift(id: string, input: ShiftDefinitionInput): ShiftDefin
       JSON.stringify(input.weekdays ?? []),
       input.requiredMin,
       input.requiredMax,
+      input.staffsReception === false ? 0 : 1,
       id,
     );
   return getShift(id);

@@ -1,4 +1,4 @@
-import { STAFF_GROUPS, type EmployeeInput } from "@vet/shared";
+import { STAFF_GROUPS, tierRank, type EmployeeInput } from "@vet/shared";
 import { HttpError, json, readJson } from "../http";
 import {
   createEmployee,
@@ -7,6 +7,7 @@ import {
   listEmployees,
   updateEmployee,
 } from "../repos/employees";
+import { listTiers } from "../repos/qualifications";
 import type { Route } from "./index";
 
 const VALID_GROUPS = new Set(STAFF_GROUPS.map((g) => g.key));
@@ -18,10 +19,14 @@ function validate(body: any): EmployeeInput {
   if (!VALID_GROUPS.has(body.staffGroup)) {
     throw new HttpError(400, "Nieprawidłowa grupa pracownicza");
   }
+  const tier = String(body.qualificationTier ?? "");
+  if (tierRank(body.staffGroup, tier) === undefined) {
+    throw new HttpError(400, "Wybrana kwalifikacja nie należy do grupy pracownika");
+  }
   return {
     name: body.name.trim(),
     staffGroup: body.staffGroup,
-    qualificationLevel: Number(body.qualificationLevel ?? 1),
+    qualificationTier: tier,
     contractHours: Number(body.contractHours ?? 0),
     defaultAvailability: body.defaultAvailability ?? {},
     active: body.active ?? true,
@@ -30,6 +35,7 @@ function validate(body: any): EmployeeInput {
 
 export const employeeRoutes: Route[] = [
   { method: "GET", path: "/staff-groups", handler: () => json(STAFF_GROUPS) },
+  { method: "GET", path: "/qualifications", handler: () => json(listTiers()) },
 
   { method: "GET", path: "/employees", handler: () => json(listEmployees()) },
   {

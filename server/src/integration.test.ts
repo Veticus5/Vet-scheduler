@@ -23,6 +23,7 @@ const { listEmployees } = await import("./repos/employees");
 const { listShifts } = await import("./repos/shifts");
 const { listRequests } = await import("./repos/requests");
 const { validate } = await import("./domain/validator");
+const { rankMap } = await import("./repos/qualifications");
 const { expandInstances } = await import("./domain/calendar");
 const { closeDb } = await import("./db");
 
@@ -41,8 +42,8 @@ beforeAll(cleanup);
 afterAll(cleanup);
 
 test("full data flow: define, validate, save, reload", () => {
-  const a = createEmployee({ name: "A Senior", staffGroup: "reception", qualificationLevel: 3, contractHours: 160, defaultAvailability: {}, active: true });
-  const b = createEmployee({ name: "B Junior", staffGroup: "reception", qualificationLevel: 1, contractHours: 160, defaultAvailability: {}, active: true });
+  const a = createEmployee({ name: "A Senior", staffGroup: "reception", qualificationTier: "zastepca-kierownika", contractHours: 160, defaultAvailability: {}, active: true });
+  const b = createEmployee({ name: "B Junior", staffGroup: "reception", qualificationTier: "niedoswiadczony", contractHours: 160, defaultAvailability: {}, active: true });
 
   const morning = createShift({ staffGroup: "reception", name: "Poranna", startTime: "07:30", endTime: "15:30", weekdays: [3], requiredMin: 2, requiredMax: 4 });
 
@@ -76,6 +77,7 @@ test("full data flow: define, validate, save, reload", () => {
     rules: listEnabledRules(),
     requests: listRequests(month),
     assignments,
+    tierRanks: rankMap(),
   });
   // Other Wednesdays are empty → coverage violations expected, but the first is clean.
   expect(validation.violations.some((v) => v.date === first.date && v.kind !== undefined)).toBe(false);
@@ -89,7 +91,7 @@ test("full data flow: define, validate, save, reload", () => {
 });
 
 test("over-constrained month flags violations instead of hiding them", () => {
-  const only = createEmployee({ name: "Tylko Jeden", staffGroup: "technicians", qualificationLevel: 2, contractHours: 160, defaultAvailability: {}, active: true });
+  const only = createEmployee({ name: "Tylko Jeden", staffGroup: "technicians", qualificationTier: "podstawowy", contractHours: 160, defaultAvailability: {}, active: true });
   createShift({ staffGroup: "technicians", name: "Dyżur", startTime: "08:00", endTime: "20:00", weekdays: [1], requiredMin: 3, requiredMax: 3 });
 
   const month = "2026-07";

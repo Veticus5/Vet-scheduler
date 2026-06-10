@@ -15,6 +15,17 @@ export function weekdayOf(isoDate: string): Weekday {
   return new Date(y, m - 1, d).getDay() as Weekday;
 }
 
+/**
+ * Expand a weekday recurrence (e.g. `[3]` = "every Wednesday") into the concrete
+ * YYYY-MM-DD dates of `month` that fall on those weekdays. Sorted ascending,
+ * never includes dates outside the month; empty `weekdays` → empty list.
+ */
+export function expandRecurrence(month: string, weekdays: Weekday[]): string[] {
+  if (!weekdays.length) return [];
+  const wanted = new Set(weekdays);
+  return datesOfMonth(month).filter((date) => wanted.has(weekdayOf(date)));
+}
+
 /** Pure expansion of shift definitions into per-date instances for a month. */
 export function expandInstances(
   defs: ShiftDefinition[],

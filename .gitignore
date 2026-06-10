@@ -10,3 +10,4 @@ dist/
 ui/dist/
 server/dist/
 data/
+*.bun-build

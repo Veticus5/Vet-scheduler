@@ -6,7 +6,7 @@ import { Banner, groupLabel, useLoader } from "../common";
 const EMPTY: EmployeeInput = {
   name: "",
   staffGroup: "reception",
-  qualificationLevel: 1,
+  qualificationTier: "",
   contractHours: 160,
   defaultAvailability: {},
   active: true,
@@ -14,14 +14,29 @@ const EMPTY: EmployeeInput = {
 
 export function StaffPage() {
   const { data: employees, error, reload, setError } = useLoader(() => api.employees());
+  const { data: tiers } = useLoader(() => api.qualifications());
   const [form, setForm] = useState<EmployeeInput>(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  const tiersFor = (group: EmployeeInput["staffGroup"]) => tiers?.[group] ?? [];
+  const tierLabel = (e: Employee) =>
+    tiersFor(e.staffGroup).find((t) => t.key === e.qualificationTier)?.label ?? e.qualificationTier;
+
+  // The tier actually shown/submitted: the form value if valid for the group,
+  // otherwise the group's first tier. Keeps the <select> and the payload in sync
+  // regardless of async load timing (the dropdown always shows a real option).
+  const groupTiers = tiersFor(form.staffGroup);
+  const effectiveTier = groupTiers.some((t) => t.key === form.qualificationTier)
+    ? form.qualificationTier
+    : (groupTiers[0]?.key ?? "");
+
   const submit = async () => {
     if (!form.name.trim()) return;
+    if (!effectiveTier) return; // tiers not loaded yet — nothing valid to assign
+    const payload: EmployeeInput = { ...form, qualificationTier: effectiveTier };
     try {
-      if (editingId) await api.updateEmployee(editingId, form);
-      else await api.createEmployee(form);
+      if (editingId) await api.updateEmployee(editingId, payload);
+      else await api.createEmployee(payload);
       setForm(EMPTY);
       setEditingId(null);
       reload();
@@ -35,7 +50,7 @@ export function StaffPage() {
     setForm({
       name: e.name,
       staffGroup: e.staffGroup,
-      qualificationLevel: e.qualificationLevel,
+      qualificationTier: e.qualificationTier,
       contractHours: e.contractHours,
       defaultAvailability: e.defaultAvailability,
       active: e.active,
@@ -74,15 +89,17 @@ export function StaffPage() {
             </select>
           </div>
           <div className="field">
-            <label>Poziom kwalifikacji</label>
-            <input
-              type="number"
-              min={1}
-              max={5}
-              value={form.qualificationLevel}
-              onChange={(e) => setForm({ ...form, qualificationLevel: Number(e.target.value) })}
-              style={{ width: 70 }}
-            />
+            <label>Kwalifikacje</label>
+            <select
+              value={effectiveTier}
+              onChange={(e) => setForm({ ...form, qualificationTier: e.target.value })}
+            >
+              {groupTiers.map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="field">
             <label>Godziny / mies.</label>
@@ -126,7 +143,7 @@ export function StaffPage() {
               <tr key={e.id}>
                 <td>{e.name}</td>
                 <td>{groupLabel(e.staffGroup)}</td>
-                <td>{e.qualificationLevel}</td>
+                <td>{tierLabel(e)}</td>
                 <td>{e.contractHours} h</td>
                 <td className="right">
                   <button onClick={() => edit(e)}>Edytuj</button>{" "}

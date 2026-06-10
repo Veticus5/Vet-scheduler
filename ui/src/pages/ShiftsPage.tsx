@@ -13,6 +13,7 @@ const EMPTY: ShiftDefinitionInput = {
   weekdays: [1, 2, 3, 4, 5],
   requiredMin: 1,
   requiredMax: 1,
+  staffsReception: true,
 };
 
 export function ShiftsPage() {
@@ -76,6 +77,16 @@ export function ShiftsPage() {
             <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Poranna" />
           </div>
           <div className="field">
+            <label>Typ</label>
+            <select
+              value={form.staffsReception === false ? "office" : "reception"}
+              onChange={(e) => setForm({ ...form, staffsReception: e.target.value === "reception" })}
+            >
+              <option value="reception">Obsada recepcji</option>
+              <option value="office">Dyżur biurowy</option>
+            </select>
+          </div>
+          <div className="field">
             <label>Od</label>
             <input type="time" value={form.startTime} onChange={(e) => setForm({ ...form, startTime: e.target.value })} />
           </div>
@@ -127,6 +138,7 @@ export function ShiftsPage() {
             <tr>
               <th>Grupa</th>
               <th>Nazwa</th>
+              <th>Typ</th>
               <th>Godziny</th>
               <th>Dni</th>
               <th>Obsada</th>
@@ -138,6 +150,11 @@ export function ShiftsPage() {
               <tr key={s.id}>
                 <td>{groupLabel(s.staffGroup)}</td>
                 <td>{s.name}</td>
+                <td>
+                  <span className={`badge ${s.staffsReception === false ? "soft" : "muted"}`}>
+                    {s.staffsReception === false ? "Dyżur biurowy" : "Recepcja"}
+                  </span>
+                </td>
                 <td>{s.startTime}–{s.endTime}</td>
                 <td>{s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(" ")}</td>
                 <td>{s.requiredMin}–{s.requiredMax}</td>
@@ -148,7 +165,7 @@ export function ShiftsPage() {
               </tr>
             ))}
             {shifts?.length === 0 && (
-              <tr><td colSpan={6} className="muted">Brak definicji zmian.</td></tr>
+              <tr><td colSpan={7} className="muted">Brak definicji zmian.</td></tr>
             )}
           </tbody>
         </table>

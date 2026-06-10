@@ -6,7 +6,7 @@ interface Row {
   id: string;
   name: string;
   staff_group: string;
-  qualification_level: number;
+  qualification_tier: string;
   contract_hours: number;
   default_availability: string;
   active: number;
@@ -17,7 +17,7 @@ function toEmployee(r: Row): Employee {
     id: r.id,
     name: r.name,
     staffGroup: r.staff_group as Employee["staffGroup"],
-    qualificationLevel: r.qualification_level,
+    qualificationTier: r.qualification_tier,
     contractHours: r.contract_hours,
     defaultAvailability: JSON.parse(r.default_availability),
     active: !!r.active,
@@ -40,14 +40,14 @@ export function createEmployee(input: EmployeeInput): Employee {
   const id = newId();
   getDb()
     .query(
-      `INSERT INTO employees (id, name, staff_group, qualification_level, contract_hours, default_availability, active)
+      `INSERT INTO employees (id, name, staff_group, qualification_tier, contract_hours, default_availability, active)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       input.name,
       input.staffGroup,
-      input.qualificationLevel,
+      input.qualificationTier,
       input.contractHours,
       JSON.stringify(input.defaultAvailability ?? {}),
       input.active ? 1 : 0,
@@ -60,13 +60,13 @@ export function updateEmployee(id: string, input: EmployeeInput): Employee | nul
   if (!existing) return null;
   getDb()
     .query(
-      `UPDATE employees SET name = ?, staff_group = ?, qualification_level = ?, contract_hours = ?, default_availability = ?, active = ?
+      `UPDATE employees SET name = ?, staff_group = ?, qualification_tier = ?, contract_hours = ?, default_availability = ?, active = ?
        WHERE id = ?`,
     )
     .run(
       input.name,
       input.staffGroup,
-      input.qualificationLevel,
+      input.qualificationTier,
       input.contractHours,
       JSON.stringify(input.defaultAvailability ?? {}),
       input.active ? 1 : 0,

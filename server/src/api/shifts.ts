@@ -30,6 +30,8 @@ function validate(body: any): ShiftDefinitionInput {
     weekdays,
     requiredMin: min,
     requiredMax: max,
+    // Office duty when explicitly false; defaults to staffing the reception desk.
+    staffsReception: body.staffsReception !== false,
   };
 }
 

@@ -24,6 +24,9 @@ export interface ValidationContext {
   rules: Rule[];
   requests: ScheduleRequest[];
   assignments: Assignment[];
+  /** group → (tier key → rank), used to resolve qualification thresholds.
+   *  Absent map / unknown tier resolves to rank 0. */
+  tierRanks?: Map<StaffGroupKey, Map<string, number>>;
   /** Worked dates (YYYY-MM-DD) at the tail of the previous month, for the
    *  cross-month consecutive-days check. */
   prevMonthWorkedDates?: string[];
@@ -54,6 +57,14 @@ export function validate(ctx: ValidationContext): ValidationResult {
   const empById = new Map(ctx.employees.map((e) => [e.id, e]));
   const instances = expandInstances(ctx.shiftDefs, ctx.month);
 
+  // Reception-desk coverage (built-in, pairing, qualification) counts only
+  // shifts that staff the desk; office-duty shifts are worked time but not
+  // desk presence. `max-consecutive-days` and hours still include office duty.
+  const defById = new Map(ctx.shiftDefs.map((d) => [d.id, d]));
+  const deskInstances = instances.filter(
+    (i) => defById.get(i.shiftDefId)?.staffsReception !== false,
+  );
+
   // assignments grouped per shift instance
   const byInstance = new Map<string, Assignment[]>();
   for (const a of ctx.assignments) {
@@ -64,6 +75,10 @@ export function validate(ctx: ValidationContext): ValidationResult {
     (byInstance.get(instanceId(inst)) ?? [])
       .map((a) => empById.get(a.employeeId))
       .filter((e): e is Employee => !!e);
+
+  // Resolve an employee's tier to its rank within their group (0 if unknown).
+  const rankOf = (e: Employee): number =>
+    ctx.tierRanks?.get(e.staffGroup)?.get(e.qualificationTier) ?? 0;
 
   // ---- Hard requests: time-off / unavailable ----
   validateRequests(ctx, violations, unmet);
@@ -84,10 +99,10 @@ export function validate(ctx: ValidationContext): ValidationResult {
 
     switch (rule.kind) {
       case "pairing":
-        checkPairing(rule, instances, inScope, assignedAt, fail);
+        checkPairing(rule, deskInstances, inScope, assignedAt, rankOf, fail);
         break;
       case "qualification-coverage":
-        checkQualificationCoverage(rule, instances, inScope, assignedAt, fail);
+        checkQualificationCoverage(rule, deskInstances, inScope, assignedAt, rankOf, fail);
         break;
       case "max-consecutive-days":
         checkMaxConsecutive(rule, ctx, groups, fail);
@@ -170,6 +185,8 @@ function validateCoverage(
   for (const inst of instances) {
     const def = defById.get(inst.shiftDefId);
     if (!def) continue;
+    // Office-duty shifts do not staff the reception desk → not counted here.
+    if (def.staffsReception === false) continue;
     const { min, max } = effectiveCoverage(inst, def, coverageRules);
     const count = assignedAt(inst).length;
     if (count < min) {
@@ -197,6 +214,7 @@ function checkPairing(
   instances: ShiftInstance[],
   inScope: (i: ShiftInstance) => boolean,
   assignedAt: (i: ShiftInstance) => Employee[],
+  rankOf: (e: Employee) => number,
   fail: (v: Omit<Violation, "ruleId" | "ruleName" | "kind">) => void,
 ): void {
   const p = rule.params as RuleParamsPairing;
@@ -207,7 +225,7 @@ function checkPairing(
     const subjects = present.filter(
       (e) =>
         (p.employeeId && e.id === p.employeeId) ||
-        (p.minQualificationLevel !== undefined && e.qualificationLevel >= p.minQualificationLevel),
+        (p.minQualificationLevel !== undefined && rankOf(e) >= p.minQualificationLevel),
     );
     if (subjects.length === 0) continue;
     const hasPartner = present.some((e) => withGroups.has(e.staffGroup) && !subjects.includes(e));
@@ -226,12 +244,13 @@ function checkQualificationCoverage(
   instances: ShiftInstance[],
   inScope: (i: ShiftInstance) => boolean,
   assignedAt: (i: ShiftInstance) => Employee[],
+  rankOf: (e: Employee) => number,
   fail: (v: Omit<Violation, "ruleId" | "ruleName" | "kind">) => void,
 ): void {
   const p = rule.params as RuleParamsQualificationCoverage;
   for (const inst of instances) {
     if (!inScope(inst)) continue;
-    const qualified = assignedAt(inst).filter((e) => e.qualificationLevel >= p.minQualificationLevel);
+    const qualified = assignedAt(inst).filter((e) => rankOf(e) >= p.minQualificationLevel);
     if (qualified.length < p.minCount) {
       fail({
         message: `${inst.date}: ${qualified.length} os. o kwalifikacji ≥ ${p.minQualificationLevel} (wymagane ${p.minCount}).`,

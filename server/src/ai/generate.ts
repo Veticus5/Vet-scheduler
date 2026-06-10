@@ -7,9 +7,10 @@ import type {
   ShiftDefinition,
   ValidationResult,
 } from "@vet/shared";
-import { isMachineValidated } from "@vet/shared";
+import { isMachineValidated, QUALIFICATION_TIERS } from "@vet/shared";
 import { HttpError } from "../http";
 import { getApiKey, getSettings } from "../repos/settings";
+import { rankMap } from "../repos/qualifications";
 import { expandInstances } from "../domain/calendar";
 import { validate, type ValidationContext } from "../domain/validator";
 
@@ -27,6 +28,10 @@ export interface GenerateResult {
   validation: ValidationResult;
   attempts: number;
 }
+
+// Upper bound on the model's response. A whole-month schedule can run to many
+// thousands of tokens; 32k comfortably covers it for the supported models.
+const MAX_OUTPUT_TOKENS = 32000;
 
 const SUBMIT_TOOL: Anthropic.Tool = {
   name: "submit_schedule",
@@ -54,15 +59,19 @@ const SUBMIT_TOOL: Anthropic.Tool = {
 
 function buildContextPayload(input: GenerateInput) {
   const instances = expandInstances(input.shiftDefs, input.month);
+  const tierLabel = (group: Employee["staffGroup"], key: string) =>
+    QUALIFICATION_TIERS[group].find((t) => t.key === key)?.label ?? key;
   return {
     month: input.month,
+    // Named qualification tiers per group; higher rank = more qualified.
+    qualificationTiers: QUALIFICATION_TIERS,
     employees: input.employees
       .filter((e) => e.active)
       .map((e) => ({
         id: e.id,
         name: e.name,
         staffGroup: e.staffGroup,
-        qualificationLevel: e.qualificationLevel,
+        qualificationTier: tierLabel(e.staffGroup, e.qualificationTier),
         contractHours: e.contractHours,
         defaultAvailability: e.defaultAvailability,
       })),
@@ -74,6 +83,8 @@ function buildContextPayload(input: GenerateInput) {
       endTime: d.endTime,
       requiredMin: d.requiredMin,
       requiredMax: d.requiredMax,
+      // true = staffs the reception desk; false = office duty (admin work).
+      staffsReception: d.staffsReception,
     })),
     shiftInstances: instances,
     rules: input.rules
@@ -103,6 +114,9 @@ Rules:
 - Soft rules and "preferred" requests are preferences — satisfy them when possible.
 - Free-form rules/requests are guidance expressed in natural language.
 - Only assign an employee to their own staff group's shifts.
+- Shifts with "staffsReception": false are OFFICE DUTY (administrative work), NOT
+  reception-desk coverage. They count as worked hours but do NOT satisfy a shift's
+  required reception coverage — never use an office-duty shift to fill desk coverage.
 
 Return the schedule ONLY by calling the submit_schedule tool. Do not write prose.`;
 
@@ -135,6 +149,7 @@ function validationContext(input: GenerateInput, assignments: Assignment[]): Val
     rules: input.rules,
     requests: input.requests,
     assignments,
+    tierRanks: rankMap(),
     prevMonthWorkedDates: input.prevMonthWorkedDates,
   };
 }
@@ -165,17 +180,34 @@ export async function generateSchedule(input: GenerateInput): Promise<GenerateRe
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let msg: Anthropic.Message;
     try {
-      msg = await client.messages.create({
-        model: settings.aiModel,
-        max_tokens: 8192,
-        system: SYSTEM_PROMPT,
-        tools: [SUBMIT_TOOL],
-        tool_choice: { type: "tool", name: "submit_schedule" },
-        messages,
-      });
+      // Stream and collect the final message. With max_tokens this high the
+      // SDK rejects a non-streaming create() ("Streaming is strongly
+      // recommended for operations that may take longer than 10 minutes").
+      // .finalMessage() yields the same Anthropic.Message, so parsing below
+      // is unchanged.
+      msg = await client.messages
+        .stream({
+          model: settings.aiModel,
+          // A full month's assignments (UUIDs per date/shift/employee) is large;
+          // too low a limit truncates the tool call mid-JSON → unparseable output.
+          max_tokens: MAX_OUTPUT_TOKENS,
+          system: SYSTEM_PROMPT,
+          tools: [SUBMIT_TOOL],
+          tool_choice: { type: "tool", name: "submit_schedule" },
+          messages,
+        })
+        .finalMessage();
     } catch (e: any) {
       // Network / provider error — do not mutate stored data; surface clearly.
       throw new HttpError(502, `Błąd połączenia z AI: ${e?.message ?? "nieznany błąd"}`);
+    }
+
+    if (msg.stop_reason === "max_tokens") {
+      throw new HttpError(
+        502,
+        "Odpowiedź modelu została ucięta przez limit długości (grafik zbyt duży). " +
+          "Zmniejsz liczbę pracowników/zmian dla tego miesiąca lub spróbuj ponownie.",
+      );
     }
 
     const { assignments, toolUseId } = parseAssignments(msg);

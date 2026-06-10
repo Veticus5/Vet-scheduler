@@ -1,9 +1,10 @@
 import type { Assignment, ScheduleStatus } from "@vet/shared";
-import { HttpError, json, readJson } from "../http";
+import { HttpError, json, readJson, streamJob } from "../http";
 import { listEmployees } from "../repos/employees";
 import { listShifts } from "../repos/shifts";
 import { listEnabledRules } from "../repos/rules";
 import { listRequests } from "../repos/requests";
+import { rankMap } from "../repos/qualifications";
 import {
   getSchedule,
   listScheduleMonths,
@@ -30,6 +31,7 @@ function buildContext(month: string, assignments: Assignment[]): ValidationConte
     rules: listEnabledRules(),
     requests: listRequests(month),
     assignments,
+    tierRanks: rankMap(),
     prevMonthWorkedDates: workedDatesOf(previousMonth(month)),
   };
 }
@@ -69,24 +71,29 @@ export const scheduleRoutes: Route[] = [
   {
     method: "POST",
     path: "/schedules/:month/generate",
-    handler: async (_req, p) => {
+    handler: (_req, p) => {
       requireMonth(p.month!);
       const month = p.month!;
-      const result = await generateSchedule({
-        month,
-        employees: listEmployees(),
-        shiftDefs: listShifts(),
-        rules: listEnabledRules(),
-        requests: listRequests(month),
-        prevMonthWorkedDates: workedDatesOf(previousMonth(month)),
+      // Streamed with heartbeats: generation can run for several minutes
+      // (slow model + repair attempts) and a plain response would be killed
+      // by the connection idle timeout.
+      return streamJob(async () => {
+        const result = await generateSchedule({
+          month,
+          employees: listEmployees(),
+          shiftDefs: listShifts(),
+          rules: listEnabledRules(),
+          requests: listRequests(month),
+          prevMonthWorkedDates: workedDatesOf(previousMonth(month)),
+        });
+        const schedule = saveSchedule(
+          month,
+          result.assignments,
+          statusFor(result.validation),
+          result.validation.violations,
+        );
+        return { schedule, validation: result.validation, attempts: result.attempts };
       });
-      const schedule = saveSchedule(
-        month,
-        result.assignments,
-        statusFor(result.validation),
-        result.validation.violations,
-      );
-      return json({ schedule, validation: result.validation, attempts: result.attempts });
     },
   },
   {

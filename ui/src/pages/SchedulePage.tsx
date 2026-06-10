@@ -197,7 +197,13 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
                     <td>{inst.date}{isConflict ? " ⚠️" : ""}</td>
                     <td>{WEEKDAY_LABELS[weekdayOf(inst.date)]}</td>
                     <td>{groupLabel(inst.staffGroup)}</td>
-                    <td>{def?.name ?? inst.shiftDefId}<div className="muted">{def ? `${def.startTime}–${def.endTime} (${def.requiredMin}–${def.requiredMax})` : ""}</div></td>
+                    <td>
+                      {def?.name ?? inst.shiftDefId}
+                      {def?.staffsReception === false && (
+                        <span className="badge soft" style={{ marginLeft: 6 }}>Biuro</span>
+                      )}
+                      <div className="muted">{def ? `${def.startTime}–${def.endTime} (${def.requiredMin}–${def.requiredMax})` : ""}</div>
+                    </td>
                     <td>
                       <CellEditor
                         inst={inst}

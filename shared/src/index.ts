@@ -20,11 +20,43 @@ export const STAFF_GROUPS: StaffGroup[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Employees
+// Qualification tiers — named, ordered, defined per staff group.
+// Each group has its own breakdown; `rank` orders tiers by seniority
+// (higher = more qualified) and is what scheduling rules compare against.
 // ---------------------------------------------------------------------------
 
-/** Higher number = more qualified. Meaning is clinic-defined. */
-export type QualificationLevel = number;
+export interface QualificationTier {
+  /** Stable key, unique within its group. */
+  key: string;
+  label: string;
+  /** Seniority order within the group; higher = more qualified. */
+  rank: number;
+}
+
+/**
+ * The qualification breakdown per group. Reception is modelled in full;
+ * technicians and doctors carry a single placeholder tier until their own
+ * breakdowns are defined in dedicated changes.
+ */
+export const QUALIFICATION_TIERS: Record<StaffGroupKey, QualificationTier[]> = {
+  reception: [
+    { key: "niedoswiadczony", label: "Niedoświadczony", rank: 1 },
+    { key: "doswiadczony", label: "Doświadczony", rank: 2 },
+    { key: "zastepca-kierownika", label: "Zastępca kierownika", rank: 3 },
+    { key: "kierownik", label: "Kierownik", rank: 4 },
+  ],
+  technicians: [{ key: "podstawowy", label: "Podstawowy", rank: 1 }],
+  doctors: [{ key: "podstawowy", label: "Podstawowy", rank: 1 }],
+};
+
+/** Resolve a tier key to its rank within a group; undefined if unknown. */
+export function tierRank(group: StaffGroupKey, tierKey: string): number | undefined {
+  return QUALIFICATION_TIERS[group].find((t) => t.key === tierKey)?.rank;
+}
+
+// ---------------------------------------------------------------------------
+// Employees
+// ---------------------------------------------------------------------------
 
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday ... 6 = Saturday
 
@@ -39,7 +71,8 @@ export interface Employee {
   id: string;
   name: string;
   staffGroup: StaffGroupKey;
-  qualificationLevel: QualificationLevel;
+  /** Qualification tier key; must belong to this employee's `staffGroup`. */
+  qualificationTier: string;
   /** Target hours for the planning period (used as a soft target by generation). */
   contractHours: number;
   defaultAvailability: DefaultAvailability;
@@ -64,9 +97,18 @@ export interface ShiftDefinition {
   /** Required coverage (used by the `coverage` rule + generation). */
   requiredMin: number;
   requiredMax: number;
+  /**
+   * Whether this shift staffs the reception desk. `false` = office duty:
+   * administrative work in the office that counts as worked hours but does NOT
+   * fill reception-desk coverage. Defaults to `true` (staffs the desk).
+   */
+  staffsReception: boolean;
 }
 
-export type ShiftDefinitionInput = Omit<ShiftDefinition, "id">;
+/** `staffsReception` is optional on input and defaults to `true` server-side. */
+export type ShiftDefinitionInput = Omit<ShiftDefinition, "id" | "staffsReception"> & {
+  staffsReception?: boolean;
+};
 
 /** A concrete shift on a concrete date, derived from a definition for a month. */
 export interface ShiftInstance {
@@ -92,14 +134,16 @@ export type RuleScope =
   | { type: "cross-group"; groups: StaffGroupKey[] };
 
 export interface RuleParamsPairing {
-  /** Employee that must be paired, OR any employee at/above a qualification level. */
+  /** Employee that must be paired, OR any employee at/above a qualification tier. */
   employeeId?: string;
+  /** Minimum tier **rank** (within the rule's group) that makes an employee a subject. */
   minQualificationLevel?: number;
   /** Must share each shift with at least one employee from this set. */
   withGroup: StaffGroupKey[];
 }
 
 export interface RuleParamsQualificationCoverage {
+  /** Minimum tier **rank** (within the rule's group) an employee must have to qualify. */
   minQualificationLevel: number;
   /** At least this many qualifying employees per shift instance. */
   minCount: number;
@@ -159,6 +203,13 @@ export interface ScheduleRequest {
   type: RequestType;
   /** Affected dates (YYYY-MM-DD), for time-off/unavailable/preferred. */
   dates?: string[];
+  /**
+   * Recurring pattern by weekday (e.g. `{ weekdays: [3] }` = "every Wednesday").
+   * When present, the server expands it into concrete `dates` within `month` on
+   * save, so the validator/generation keep reading `dates` unchanged. Time of day
+   * (e.g. "mornings") is expressed via `shiftDefIds`, not here.
+   */
+  recurrence?: { weekdays: Weekday[] };
   /** Affected shift-definition ids, optional refinement. */
   shiftDefIds?: string[];
   /** Free-form preference text (always passed to the AI). */

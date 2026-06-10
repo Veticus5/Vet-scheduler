@@ -8,9 +8,17 @@ import {
   type RuleParams,
   type RuleScope,
   type StaffGroupKey,
+  type Weekday,
 } from "@vet/shared";
 import { api } from "../api";
-import { Banner, groupLabel, useLoader } from "../common";
+import { Banner, WEEKDAY_LABELS, groupLabel, useLoader } from "../common";
+
+// Monday-first display order for weekday pickers (0 = Sunday … 6 = Saturday).
+const WEEKDAY_ORDER: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
+
+function scopeGroups(scope: RuleScope): StaffGroupKey[] {
+  return scope.type === "group" ? [scope.group] : scope.groups;
+}
 
 const KIND_LABELS: Record<RuleKind, string> = {
   pairing: "Parowanie",
@@ -50,12 +58,66 @@ function emptyRule(): RuleInput {
 export function RulesPage() {
   const { data: rules, error, reload, setError } = useLoader(() => api.rules());
   const { data: employees } = useLoader(() => api.employees());
+  const { data: shifts } = useLoader(() => api.shifts());
   const [form, setForm] = useState<RuleInput>(emptyRule());
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // "Reguła z opisu (AI)" panel state.
+  const [aiText, setAiText] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<RuleInput[] | null>(null);
+
+  const loadIntoForm = (r: RuleInput) => {
+    setForm(r);
+    setEditingId(null);
+  };
+
+  // Wczytaj jedną propozycję do formularza i zdejmij ją z listy — reszta
+  // zostaje, żeby można było zapisać i wczytać kolejne pojedynczo.
+  const pickProposal = (i: number) => {
+    if (!proposals) return;
+    loadIntoForm(proposals[i]!);
+    const rest = proposals.filter((_, idx) => idx !== i);
+    setProposals(rest.length ? rest : null);
+  };
+
+  const runDraft = async () => {
+    if (!aiText.trim()) return setAiError("Wpisz opis reguły lub wczytaj plik .txt");
+    setAiBusy(true);
+    setAiError(null);
+    setProposals(null);
+    try {
+      const drafts = await api.draftRulesFromText(aiText);
+      if (drafts.length === 1) loadIntoForm(drafts[0]!);
+      else setProposals(drafts);
+    } catch (e: any) {
+      setAiError(e.message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const readTxtFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      setAiText(await file.text());
+      setAiError(null);
+    } catch {
+      setAiError("Nie udało się odczytać pliku.");
+    }
+  };
 
   const setKind = (kind: RuleKind) => setForm({ ...form, kind, params: defaultParams(kind) });
   const setParams = (patch: Record<string, unknown>) =>
     setForm({ ...form, params: { ...form.params, ...patch } as RuleParams });
+  // Toggle one value in an array-valued param; drop the key entirely when empty
+  // so an unscoped (all-days / all-shifts) rule stays unscoped.
+  const toggleInParam = <T,>(key: string, value: T) => {
+    const cur = ((form.params as any)[key] as T[] | undefined) ?? [];
+    const next = cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value];
+    setParams({ [key]: next.length ? next : undefined });
+  };
 
   const submit = async () => {
     if (!form.name.trim()) return setError("Podaj nazwę reguły");
@@ -88,6 +150,59 @@ export function RulesPage() {
       <h2>Reguły stałe</h2>
       <p className="muted">Obowiązują w każdym miesiącu, dopóki ich nie zmienisz. Twarde = walidator pilnuje; miękkie = preferencja.</p>
       {error && <Banner kind="error">{error}</Banner>}
+
+      <div className="panel">
+        <h3>Utwórz regułę z opisu (AI)</h3>
+        <p className="muted">
+          Opisz zasadę po ludzku lub wczytaj plik .txt. AI zaproponuje wersję roboczą — sprawdzisz ją i zapiszesz
+          ręcznie w formularzu poniżej. Wymaga klucza API (Ustawienia).
+        </p>
+        {aiError && <Banner kind="error">{aiError}</Banner>}
+        <div className="field">
+          <textarea
+            value={aiText}
+            onChange={(e) => setAiText(e.target.value)}
+            rows={3}
+            style={{ width: "100%" }}
+            placeholder="np. Daria zawsze musi pracować z kimś z recepcji; technicy maksymalnie 5 dni z rzędu."
+          />
+        </div>
+        <div className="row" style={{ marginTop: 8, alignItems: "flex-end" }}>
+          <button className="primary" onClick={runDraft} disabled={aiBusy}>
+            {aiBusy ? "Generuję…" : "Zaproponuj regułę"}
+          </button>
+          <div className="field">
+            <label>…lub wczytaj plik .txt</label>
+            <input type="file" accept=".txt,text/plain" onChange={(e) => readTxtFile(e.target.files?.[0])} />
+          </div>
+        </div>
+
+        {proposals && (
+          <div style={{ marginTop: 12 }}>
+            <p className="muted">
+              AI zaproponowało {proposals.length} reguł(y). Wczytuj je pojedynczo: wczytaj do formularza, sprawdź,
+              zapisz — wczytana znika z listy, a reszta czeka tu na kolejne.
+            </p>
+            {proposals.map((r, i) => (
+              <div
+                key={i}
+                className="row"
+                style={{ alignItems: "center", borderTop: "1px solid #eee", padding: "8px 0" }}
+              >
+                <div style={{ flex: 1 }}>
+                  <strong>{r.name}</strong>
+                  <div className="muted">
+                    {KIND_LABELS[r.kind]} · {r.hard ? "twarda" : "miękka"} ·{" "}
+                    {r.scope.type === "group" ? groupLabel(r.scope.group) : "między grupami"}
+                  </div>
+                  {r.description && <div className="muted">{r.description}</div>}
+                </div>
+                <button onClick={() => pickProposal(i)}>Wczytaj do formularza</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="panel">
         <h3>{editingId ? "Edytuj regułę" : "Dodaj regułę"}</h3>
@@ -148,12 +263,50 @@ export function RulesPage() {
         )}
 
         {form.kind === "coverage" && (
-          <div className="row" style={{ marginTop: 8 }}>
-            <div className="field"><label>Min</label>
-              <input type="number" value={p.min ?? ""} onChange={(e) => setParams({ min: e.target.value ? Number(e.target.value) : undefined })} style={{ width: 70 }} /></div>
-            <div className="field"><label>Max</label>
-              <input type="number" value={p.max ?? ""} onChange={(e) => setParams({ max: e.target.value ? Number(e.target.value) : undefined })} style={{ width: 70 }} /></div>
-            <span className="muted">Nadpisuje obsadę zdefiniowaną na zmianach (dla zasięgu reguły).</span>
+          <div style={{ marginTop: 8 }}>
+            <div className="row">
+              <div className="field"><label>Min</label>
+                <input type="number" value={p.min ?? ""} onChange={(e) => setParams({ min: e.target.value ? Number(e.target.value) : undefined })} style={{ width: 70 }} /></div>
+              <div className="field"><label>Max</label>
+                <input type="number" value={p.max ?? ""} onChange={(e) => setParams({ max: e.target.value ? Number(e.target.value) : undefined })} style={{ width: 70 }} /></div>
+              <span className="muted">Nadpisuje obsadę zdefiniowaną na zmianach (dla zasięgu reguły).</span>
+            </div>
+            <div className="field" style={{ marginTop: 8 }}>
+              <label>Dni tygodnia (puste = wszystkie dni)</label>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                {WEEKDAY_ORDER.map((wd) => (
+                  <label key={wd} className="row" style={{ gap: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={(p.weekdays ?? []).includes(wd)}
+                      onChange={() => toggleInParam<Weekday>("weekdays", wd)}
+                    />
+                    {WEEKDAY_LABELS[wd]}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="field" style={{ marginTop: 8 }}>
+              <label>Zmiany (puste = wszystkie zmiany grupy)</label>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                {(shifts ?? [])
+                  .filter((s) => scopeGroups(form.scope).includes(s.staffGroup))
+                  .map((s) => (
+                    <label key={s.id} className="row" style={{ gap: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={(p.shiftDefIds ?? []).includes(s.id)}
+                        onChange={() => toggleInParam<string>("shiftDefIds", s.id)}
+                      />
+                      {s.name}
+                    </label>
+                  ))}
+              </div>
+            </div>
+            <p className="muted" style={{ marginTop: 4 }}>
+              Gdy obsada różni się między dniami (np. inna w weekend), utwórz osobną regułę
+              na każdą wartość i zaznacz właściwe dni — inaczej reguły nadpisują się nawzajem.
+            </p>
           </div>
         )}
 
