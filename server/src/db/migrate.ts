@@ -109,6 +109,28 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     version: 4,
     sql: `ALTER TABLE shift_definitions ADD COLUMN staffs_reception INTEGER NOT NULL DEFAULT 1;`,
   },
+  {
+    // Seed the default "experienced cover" rule (H5/D3): at least one employee
+    // of rank >= 2 (doświadczony) on every reception shift. Combined with the
+    // weekend 2+2 coverage this guarantees an inexperienced person is never
+    // alone on a weekend. Seeded ON by default but a normal editable rule — the
+    // clinic can disable or delete it; this migration runs once and won't
+    // resurrect it. Runs once so it never overrides a later deliberate change.
+    version: 5,
+    sql: `
+      INSERT INTO rules (id, name, kind, hard, scope, params, description, enabled)
+      VALUES (
+        'seed-reception-experienced',
+        'Min. 1 doświadczony na zmianie recepcji',
+        'qualification-coverage',
+        1,
+        '{"type":"group","group":"reception"}',
+        '{"minQualificationLevel":2,"minCount":1}',
+        'Na każdej zmianie recepcji co najmniej jedna osoba o randze ≥ doświadczony. Gwarantuje m.in., że osoba niedoświadczona nie zostaje sama (zwłaszcza w weekend). Domyślnie włączona — można ją wyłączyć świadomie.',
+        1
+      );
+    `,
+  },
 ];
 
 /**

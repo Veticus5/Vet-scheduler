@@ -6,10 +6,10 @@ import { listEnabledRules } from "../repos/rules";
 import { listRequests } from "../repos/requests";
 import { rankMap } from "../repos/qualifications";
 import {
+  assignmentsOf,
   getSchedule,
   listScheduleMonths,
   saveSchedule,
-  workedDatesOf,
 } from "../repos/schedules";
 import { validate, type ValidationContext } from "../domain/validator";
 import { generateSchedule } from "../ai/generate";
@@ -32,7 +32,7 @@ function buildContext(month: string, assignments: Assignment[]): ValidationConte
     requests: listRequests(month),
     assignments,
     tierRanks: rankMap(),
-    prevMonthWorkedDates: workedDatesOf(previousMonth(month)),
+    prevMonthAssignments: assignmentsOf(previousMonth(month)),
   };
 }
 
@@ -84,7 +84,7 @@ export const scheduleRoutes: Route[] = [
           shiftDefs: listShifts(),
           rules: listEnabledRules(),
           requests: listRequests(month),
-          prevMonthWorkedDates: workedDatesOf(previousMonth(month)),
+          prevMonthAssignments: assignmentsOf(previousMonth(month)),
         });
         const schedule = saveSchedule(
           month,
@@ -92,7 +92,13 @@ export const scheduleRoutes: Route[] = [
           statusFor(result.validation),
           result.validation.violations,
         );
-        return { schedule, validation: result.validation, attempts: result.attempts };
+        return {
+          schedule,
+          validation: result.validation,
+          attempts: result.attempts,
+          feasibility: result.feasibility,
+          systemic: result.systemic,
+        };
       });
     },
   },

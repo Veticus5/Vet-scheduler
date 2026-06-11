@@ -3,6 +3,7 @@ import type {
   EmployeeInput,
   Rule,
   RuleInput,
+  FeasibilityReport,
   Schedule,
   ScheduleRequest,
   ScheduleRequestInput,
@@ -121,9 +122,13 @@ export const api = {
   scheduleMonths: () => req<string[]>("GET", "/schedules"),
   schedule: (month: string) => req<Schedule>("GET", `/schedules/${month}`),
   generate: (month: string) =>
-    reqStream<{ schedule: Schedule; validation: ValidationResult; attempts: number }>(
-      `/schedules/${month}/generate`,
-    ),
+    reqStream<{
+      schedule: Schedule;
+      validation: ValidationResult;
+      attempts: number;
+      feasibility: FeasibilityReport;
+      systemic: boolean;
+    }>(`/schedules/${month}/generate`),
   saveSchedule: (month: string, assignments: Assignment[]) =>
     req<{ schedule: Schedule; validation: ValidationResult }>("PUT", `/schedules/${month}`, { assignments }),
   validateSchedule: (month: string, assignments: Assignment[]) =>

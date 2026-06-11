@@ -236,6 +236,32 @@ describe("qualification-coverage", () => {
     expect(res.valid).toBe(true);
     expect(res.unmetPreferences.length).toBeGreaterThan(0);
   });
+
+  test("an empty OPTIONAL shift (min 0, nobody assigned) is not flagged", () => {
+    // The classic phantom: a global qualification rule must not fire on an
+    // unstaffed optional shift — there is no one to qualify.
+    const res = validate(
+      ctx({
+        employees: [emp("senior", { qualificationTier: "kierownik" })],
+        shiftDefs: [shift("optional", 0, 1)],
+        rules: [rule],
+        assignments: [], // nothing scheduled anywhere
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "qualification-coverage")).toBe(false);
+  });
+
+  test("a REQUIRED but empty shift is still flagged", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("senior", { qualificationTier: "kierownik" })],
+        shiftDefs: [shift("needed", 1, 2, { weekdays: [3] })],
+        rules: [rule],
+        assignments: [],
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "qualification-coverage")).toBe(true);
+  });
 });
 
 // ---- max consecutive days ------------------------------------------------
@@ -275,7 +301,9 @@ describe("max-consecutive-days", () => {
         shiftDefs: [shift("s", 0, 5)],
         rules: [rule],
         assignments: [A("2026-07-01", "s", "e1"), A("2026-07-02", "s", "e1"), A("2026-07-03", "s", "e1")],
-        prevMonthWorkedDates: ["2026-06-26", "2026-06-27", "2026-06-28", "2026-06-29", "2026-06-30"],
+        prevMonthAssignments: ["2026-06-26", "2026-06-27", "2026-06-28", "2026-06-29", "2026-06-30"].map((d) =>
+          A(d, "s", "e1"),
+        ),
       }),
     );
     expect(res.violations.some((v) => v.kind === "max-consecutive-days")).toBe(true);
@@ -292,6 +320,60 @@ describe("max-consecutive-days", () => {
       }),
     );
     expect(res.violations.some((v) => v.kind === "max-consecutive-days")).toBe(false);
+  });
+
+  test("working every other day all month is a streak of 1, not the span", () => {
+    // Odd days of July → 16 scattered shifts, longest run = 1. A span-based bug
+    // would report ~31. Limit 7 → no violation.
+    const assignments = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31].map((d) =>
+      A(`2026-07-${String(d).padStart(2, "0")}`, "s", "e1"),
+    );
+    const res = validate(
+      ctx({ employees: [emp("e1")], shiftDefs: [shift("s", 0, 5)], rules: [rule], assignments }),
+    );
+    expect(res.violations.some((v) => v.kind === "max-consecutive-days")).toBe(false);
+  });
+
+  test("a one-day gap resets the run", () => {
+    // Two 7-day runs split by a day off → max run 7, not 15. Limit 7 → no violation.
+    const days = [1, 2, 3, 4, 5, 6, 7, /* gap 8 */ 9, 10, 11, 12, 13, 14, 15];
+    const assignments = days.map((d) => A(`2026-07-${String(d).padStart(2, "0")}`, "s", "e1"));
+    const res = validate(
+      ctx({ employees: [emp("e1")], shiftDefs: [shift("s", 0, 5)], rules: [rule], assignments }),
+    );
+    expect(res.violations.some((v) => v.kind === "max-consecutive-days")).toBe(false);
+  });
+
+  test("cross-month run reports the true streak length (3 + 5 = 8)", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [shift("s", 0, 5)],
+        rules: [rule],
+        assignments: ["01", "02", "03", "04", "05"].map((d) => A(`2026-07-${d}`, "s", "e1")),
+        prevMonthAssignments: ["2026-06-28", "2026-06-29", "2026-06-30"].map((d) => A(d, "s", "e1")),
+      }),
+    );
+    const v = res.violations.find((x) => x.kind === "max-consecutive-days");
+    expect(v?.message).toContain("8 dni");
+  });
+
+  test("carry-in is per employee — another person's previous month does not count", () => {
+    // e2 worked all of June; e1 worked nothing in June and a short July run.
+    // e1's carry-in must be 0 (not inflated by e2's June).
+    const juneAll = Array.from({ length: 30 }, (_, i) =>
+      A(`2026-06-${String(i + 1).padStart(2, "0")}`, "s", "e2"),
+    );
+    const res = validate(
+      ctx({
+        employees: [emp("e1"), emp("e2")],
+        shiftDefs: [shift("s", 0, 5)],
+        rules: [rule],
+        assignments: ["01", "02", "03"].map((d) => A(`2026-07-${d}`, "s", "e1")),
+        prevMonthAssignments: juneAll,
+      }),
+    );
+    expect(res.violations.some((v) => v.kind === "max-consecutive-days" && v.employeeId === "e1")).toBe(false);
   });
 });
 
@@ -353,5 +435,173 @@ describe("over-constrained", () => {
     );
     expect(res.valid).toBe(false);
     expect(res.violations.length).toBeGreaterThan(0);
+  });
+});
+
+// ---- double-booking (built-in) -------------------------------------------
+
+describe("double-booking", () => {
+  test("two shifts for one person on the same day is a violation", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1"), emp("e2"), emp("e3"), emp("e4")],
+        shiftDefs: [shift("morning", 1, 4), shift("afternoon", 1, 4, { startTime: "14:30", endTime: "22:30" })],
+        assignments: [
+          A("2026-07-01", "morning", "e1"),
+          A("2026-07-01", "afternoon", "e1"), // same person, same day
+        ],
+      }),
+    );
+    const dbl = res.violations.filter((v) => v.kind === "double-booking");
+    expect(dbl).toHaveLength(1);
+    expect(dbl[0]!.employeeId).toBe("e1");
+    expect(dbl[0]!.date).toBe("2026-07-01");
+  });
+
+  test("same person on different days is fine", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [shift("morning", 1, 4)],
+        assignments: [A("2026-07-01", "morning", "e1"), A("2026-07-02", "morning", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "double-booking")).toHaveLength(0);
+  });
+});
+
+// ---- rest-period / doba pracownicza (built-in) ---------------------------
+
+describe("rest-period", () => {
+  const R = shift("R", 1, 4, { startTime: "07:30", endTime: "15:30" });
+  const P = shift("P", 1, 4, { startTime: "14:30", endTime: "22:30" });
+
+  test("afternoon then next-day morning (P→R) is a violation", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P],
+        assignments: [A("2026-07-01", "P", "e1"), A("2026-07-02", "R", "e1")],
+      }),
+    );
+    const rp = res.violations.filter((v) => v.kind === "rest-period");
+    expect(rp).toHaveLength(1);
+    expect(rp[0]!.date).toBe("2026-07-02");
+  });
+
+  test("morning then next-day afternoon (R→P) is allowed", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P],
+        assignments: [A("2026-07-01", "R", "e1"), A("2026-07-02", "P", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "rest-period")).toHaveLength(0);
+  });
+
+  test("same shift two days running (P→P) is allowed", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P],
+        assignments: [A("2026-07-01", "P", "e1"), A("2026-07-02", "P", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "rest-period")).toHaveLength(0);
+  });
+
+  test("a gap day between late and early shift is allowed", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P],
+        // P on the 1st, day off the 2nd, R on the 3rd → not adjacent, fine.
+        assignments: [A("2026-07-01", "P", "e1"), A("2026-07-03", "R", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "rest-period")).toHaveLength(0);
+  });
+
+  test("crosses the month boundary: P on the 30th, R on the 1st is a violation", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P],
+        assignments: [A("2026-07-01", "R", "e1")],
+        prevMonthAssignments: [A("2026-06-30", "P", "e1")],
+      }),
+    );
+    const rp = res.violations.filter((v) => v.kind === "rest-period");
+    expect(rp).toHaveLength(1);
+    expect(rp[0]!.date).toBe("2026-07-01");
+  });
+
+  test("office duty counts in the comparison: P→B (B starts 07:30) is a violation", () => {
+    const B = shift("B", 1, 4, { startTime: "07:30", endTime: "15:30", staffsReception: false });
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [R, P, B],
+        assignments: [A("2026-07-01", "P", "e1"), A("2026-07-02", "B", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "rest-period")).toHaveLength(1);
+  });
+});
+
+// ---- free weekend / H7 (built-in) ----------------------------------------
+
+describe("free-weekend", () => {
+  // July 2026 full in-month weekends: (4,5), (11,12), (18,19), (25,26).
+  test("a free Saturday on one weekend + free Sunday on another is NOT enough", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [shift("s", 1, 4)],
+        // Works one day of every weekend → no whole weekend ever free.
+        assignments: [
+          A("2026-07-04", "s", "e1"), // Sat of w1
+          A("2026-07-12", "s", "e1"), // Sun of w2
+          A("2026-07-18", "s", "e1"), // Sat of w3
+          A("2026-07-26", "s", "e1"), // Sun of w4
+        ],
+      }),
+    );
+    const fw = res.violations.filter((v) => v.kind === "free-weekend");
+    expect(fw).toHaveLength(1);
+    expect(fw[0]!.employeeId).toBe("e1");
+  });
+
+  test("one whole free weekend satisfies it", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1")],
+        shiftDefs: [shift("s", 1, 4)],
+        // Works w1 fully but leaves w2/w3/w4 free → has a whole free weekend.
+        assignments: [A("2026-07-04", "s", "e1"), A("2026-07-05", "s", "e1")],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "free-weekend")).toHaveLength(0);
+  });
+
+  test("inactive employees are not required to have a free weekend", () => {
+    const res = validate(
+      ctx({
+        employees: [emp("e1", { active: false })],
+        shiftDefs: [shift("s", 1, 4)],
+        assignments: [
+          A("2026-07-04", "s", "e1"),
+          A("2026-07-05", "s", "e1"),
+          A("2026-07-11", "s", "e1"),
+          A("2026-07-12", "s", "e1"),
+          A("2026-07-18", "s", "e1"),
+          A("2026-07-19", "s", "e1"),
+          A("2026-07-25", "s", "e1"),
+          A("2026-07-26", "s", "e1"),
+        ],
+      }),
+    );
+    expect(res.violations.filter((v) => v.kind === "free-weekend")).toHaveLength(0);
   });
 });

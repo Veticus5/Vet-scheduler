@@ -95,3 +95,28 @@ describe("runMigrations — shift_definitions.staffs_reception (v4)", () => {
     db.close();
   });
 });
+
+// Migration 5 seeds the default "min. 1 experienced on reception" rule, enabled.
+describe("runMigrations — default experienced-cover rule (v5)", () => {
+  function freshDb(): Database {
+    const db = new Database(":memory:");
+    db.exec("PRAGMA foreign_keys = ON;");
+    runMigrations(db);
+    return db;
+  }
+
+  test("seeds an enabled qualification-coverage rule for reception", () => {
+    const db = freshDb();
+    const row = db
+      .query<{ kind: string; hard: number; enabled: number; scope: string; params: string }, []>(
+        "SELECT kind, hard, enabled, scope, params FROM rules WHERE id = 'seed-reception-experienced'",
+      )
+      .get();
+    expect(row?.kind).toBe("qualification-coverage");
+    expect(row?.hard).toBe(1);
+    expect(row?.enabled).toBe(1);
+    expect(JSON.parse(row!.scope)).toEqual({ type: "group", group: "reception" });
+    expect(JSON.parse(row!.params)).toEqual({ minQualificationLevel: 2, minCount: 1 });
+    db.close();
+  });
+});

@@ -248,7 +248,9 @@ export interface Schedule {
 export interface Violation {
   ruleId?: string;
   ruleName: string;
-  kind: RuleKind | "time-off";
+  /** `rest-period`, `double-booking` and `free-weekend` are built-in, always-on
+   *  labour-law / sanity checks, not configurable rules. */
+  kind: RuleKind | "time-off" | "rest-period" | "double-booking" | "free-weekend";
   message: string;
   /** Where it occurred, for UI highlighting. */
   date?: string;
@@ -267,6 +269,32 @@ export interface ValidationResult {
   violations: Violation[];
   /** Unmet soft preferences — informational, do not affect validity. */
   unmetPreferences: PreferenceReport[];
+}
+
+// ---------------------------------------------------------------------------
+// Feasibility — deterministic capacity check run before AI generation.
+// ---------------------------------------------------------------------------
+
+/**
+ * A reception-staffing shift instance whose required minimum cannot be met
+ * because too few eligible employees are available that day. This is a
+ * structural gap (not enough people) — no schedule can fill it, so it is
+ * reported separately from AI conflicts.
+ */
+export interface CoverageGap {
+  date: string; // YYYY-MM-DD
+  shiftDefId: string;
+  shiftName: string;
+  /** Required minimum coverage for the instance. */
+  required: number;
+  /** Eligible + available employees — the most that could ever be assigned. */
+  available: number;
+}
+
+export interface FeasibilityReport {
+  /** True when every shift instance can in principle reach its minimum. */
+  feasible: boolean;
+  gaps: CoverageGap[];
 }
 
 // ---------------------------------------------------------------------------

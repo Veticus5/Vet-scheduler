@@ -80,9 +80,8 @@ export function saveSchedule(
   return getSchedule(month)!;
 }
 
-/** Worked dates of a month's saved schedule (for cross-month carryover). */
-export function workedDatesOf(month: string): string[] {
-  const s = getSchedule(month);
-  if (!s) return [];
-  return [...new Set(s.assignments.map((a) => a.date))];
+/** Saved assignments of a month (for cross-month carryover: consecutive-days
+ *  and rest-period across the boundary). Empty if the month has no schedule. */
+export function assignmentsOf(month: string): Assignment[] {
+  return getSchedule(month)?.assignments ?? [];
 }

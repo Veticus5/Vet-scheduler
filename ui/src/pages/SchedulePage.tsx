@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Assignment, Employee, ShiftInstance, ValidationResult } from "@vet/shared";
+import type { Assignment, Employee, FeasibilityReport, ShiftInstance, ValidationResult } from "@vet/shared";
 import { api } from "../api";
 import { Banner, WEEKDAY_LABELS, currentMonth, groupLabel, useLoader } from "../common";
 
@@ -8,14 +8,24 @@ function weekdayOf(date: string) {
   return new Date(y, m - 1, d).getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
 }
 
+function toMinutes(time: string) {
+  const [h, m] = time.split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+/** Hours-vs-norm warning threshold (H8 is advisory, not enforced). */
+const HOURS_TOLERANCE = 8;
+
 export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; goSettings: () => void }) {
   const [month, setMonth] = useState(currentMonth());
   const { data: employees } = useLoader(() => api.employees());
   const { data: shifts } = useLoader(() => api.shifts());
   const { data: instances } = useLoader(() => fetchInstances(month), [month]);
+  const { data: requests } = useLoader(() => api.requests(month), [month]);
 
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [feasibility, setFeasibility] = useState<FeasibilityReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,6 +36,7 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
     setError(null);
     setInfo(null);
     setDirty(false);
+    setFeasibility(null); // recomputed on next generate; not stored with a saved schedule
     api
       .schedule(month)
       .then((s) => {
@@ -55,6 +66,38 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
     return set;
   }, [validation]);
 
+  // H8 — hours worked vs contract norm (advisory). Norm is reduced by 8h per
+  // time-off (urlop) day; "unavailable" is not deducted (it isn't paid leave).
+  const hoursRows = useMemo(() => {
+    const duration = (shiftDefId: string) => {
+      const d = defById.get(shiftDefId);
+      if (!d) return 0;
+      let mins = toMinutes(d.endTime) - toMinutes(d.startTime);
+      if (mins <= 0) mins += 24 * 60; // overnight guard
+      return mins / 60;
+    };
+    const timeOffDays = new Map<string, Set<string>>();
+    for (const r of requests ?? []) {
+      if (r.type !== "time-off") continue;
+      for (const day of r.dates ?? []) {
+        let s = timeOffDays.get(r.employeeId);
+        if (!s) timeOffDays.set(r.employeeId, (s = new Set()));
+        s.add(day);
+      }
+    }
+    const worked = new Map<string, number>();
+    for (const a of assignments) worked.set(a.employeeId, (worked.get(a.employeeId) ?? 0) + duration(a.shiftDefId));
+    return (employees ?? [])
+      .filter((e) => e.active)
+      .map((e) => ({
+        id: e.id,
+        name: e.name,
+        worked: worked.get(e.id) ?? 0,
+        norm: Math.max(0, e.contractHours - 8 * (timeOffDays.get(e.id)?.size ?? 0)),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [assignments, employees, defById, requests]);
+
   const generate = async () => {
     setBusy(true);
     setError(null);
@@ -63,11 +106,18 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
       const res = await api.generate(month);
       setAssignments(res.schedule.assignments);
       setValidation(res.validation);
+      setFeasibility(res.feasibility);
       setDirty(false);
+      const gapCount = res.feasibility.gaps.length;
+      const conflicts = res.validation.violations.length;
       setInfo(
         res.validation.valid
           ? `Wygenerowano poprawny grafik (próby AI: ${res.attempts}).`
-          : `Grafik wygenerowany, ale pozostały konflikty po ${res.attempts} próbach — popraw ręcznie.`,
+          : gapCount > 0
+            ? `Grafik wygenerowany, ale ${gapCount} zmian nie da się obsadzić — za mało dostępnych osób (patrz „Luki kadrowe”). Pozostałe konflikty popraw ręcznie.`
+            : res.systemic
+              ? `Konflikty (${conflicts}) wyglądają na problem konfiguracji — jedna reguła odpala się niemal co dzień. Naprawy nie uruchomiono. Sprawdź definicje zmian i reguły, potem wygeneruj ponownie.`
+              : `Grafik wygenerowany, ale pozostały konflikty po ${res.attempts} próbach — popraw ręcznie lub wygeneruj ponownie.`,
       );
     } catch (e: any) {
       setError(e.message);
@@ -152,7 +202,31 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
             </span>
           )}
         </div>
+        {validation?.valid && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            Sprawdzane są reguły walidowane maszynowo (obsada, doba pracownicza, podwójne
+            przydzielenia, dni z rzędu, wolny weekend, prośby o wolne). Reguły opisowe oraz
+            norma godzin nie są egzekwowane — zweryfikuj je ręcznie (patrz tabela godzin).
+          </p>
+        )}
       </div>
+
+      {feasibility && feasibility.gaps.length > 0 && (
+        <div className="panel">
+          <h3 style={{ color: "var(--danger)" }}>Luki kadrowe (za mało dostępnych osób)</h3>
+          <p className="muted">
+            Tych zmian nie da się obsadzić żadnym grafikiem — brakuje uprawnionych, dostępnych osób.
+            To nie błąd AI: dodaj obsadę, obniż wymagane minimum albo przesuń wolne/niedostępności.
+          </p>
+          <ul>
+            {feasibility.gaps.map((g, i) => (
+              <li key={i}>
+                <strong>{g.date} {g.shiftName}:</strong> dostępnych {g.available} z wymaganych {g.required}.
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {validation && validation.violations.length > 0 && (
         <div className="panel">
@@ -170,6 +244,44 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
         <div className="panel">
           <h3 style={{ color: "var(--warn)" }}>Niespełnione preferencje (miękkie)</h3>
           <ul>{validation.unmetPreferences.map((u, i) => <li key={i}>{u.message}</li>)}</ul>
+        </div>
+      )}
+
+      {assignments.length > 0 && hoursRows.length > 0 && (
+        <div className="panel">
+          <h3>Godziny vs norma (informacyjnie)</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Norma godzin nie jest twardo egzekwowana — to podgląd. Norma uwzględnia urlopy (wolne):
+            −8 h za dzień; niedostępność nie jest odejmowana. Żółto oznaczone odchylenie powyżej {HOURS_TOLERANCE} h.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Pracownik</th>
+                <th>Godziny</th>
+                <th>Norma</th>
+                <th>Różnica</th>
+              </tr>
+            </thead>
+            <tbody>
+              {hoursRows.map((r) => {
+                const diff = r.worked - r.norm;
+                const warn = Math.abs(diff) > HOURS_TOLERANCE;
+                return (
+                  <tr key={r.id} style={warn ? { background: "#fffbeb" } : undefined}>
+                    <td>{r.name}</td>
+                    <td>{r.worked}</td>
+                    <td>{r.norm}</td>
+                    <td>
+                      <span className={`badge ${warn ? "soft" : "muted"}`}>
+                        {diff > 0 ? `+${diff}` : diff}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
 

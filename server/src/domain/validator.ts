@@ -27,9 +27,10 @@ export interface ValidationContext {
   /** group → (tier key → rank), used to resolve qualification thresholds.
    *  Absent map / unknown tier resolves to rank 0. */
   tierRanks?: Map<StaffGroupKey, Map<string, number>>;
-  /** Worked dates (YYYY-MM-DD) at the tail of the previous month, for the
-   *  cross-month consecutive-days check. */
-  prevMonthWorkedDates?: string[];
+  /** The previous month's saved assignments. Feeds the cross-month checks:
+   *  consecutive-days carry-in and the rest period across the month boundary
+   *  (the last day's start time is needed, not just the date). */
+  prevMonthAssignments?: Assignment[];
 }
 
 interface InstanceKey {
@@ -83,8 +84,23 @@ export function validate(ctx: ValidationContext): ValidationResult {
   // ---- Hard requests: time-off / unavailable ----
   validateRequests(ctx, violations, unmet);
 
+  // ---- Built-in, always-on safety checks (not configurable rules) ----
+  // Double-booking is always invalid; rest-period and free-weekend are labour
+  // law / policy. None may be left to the model, so they live in code.
+  validateDoubleBooking(ctx, empById, violations);
+  validateRestPeriod(ctx, empById, defById, violations);
+  validateFreeWeekend(ctx, violations);
+
   // ---- Built-in coverage from shift definitions, with coverage-rule overrides ----
   validateCoverage(ctx, instances, assignedAt, violations);
+
+  // Effective required minimum per instance (coverage-rule overrides folded
+  // in) — used to tell a genuinely-required shift from an empty optional one.
+  const coverageRules = ctx.rules.filter((r) => r.enabled && r.kind === "coverage");
+  const effMin = (inst: ShiftInstance): number => {
+    const def = defById.get(inst.shiftDefId);
+    return def ? effectiveCoverage(inst, def, coverageRules).min : 0;
+  };
 
   // ---- Per-rule checks ----
   for (const rule of ctx.rules) {
@@ -102,7 +118,7 @@ export function validate(ctx: ValidationContext): ValidationResult {
         checkPairing(rule, deskInstances, inScope, assignedAt, rankOf, fail);
         break;
       case "qualification-coverage":
-        checkQualificationCoverage(rule, deskInstances, inScope, assignedAt, rankOf, fail);
+        checkQualificationCoverage(rule, deskInstances, inScope, assignedAt, rankOf, effMin, fail);
         break;
       case "max-consecutive-days":
         checkMaxConsecutive(rule, ctx, groups, fail);
@@ -155,7 +171,156 @@ function validateRequests(
   }
 }
 
-function effectiveCoverage(
+export /**
+ * Double-booking: an employee assigned to more than one shift on the same day.
+ * Always invalid — the cheapest possible model error at 300+ assignments/month.
+ * (Half-day office duty `B/2` is not modelled as a separate shift today; if it
+ * ever is, this needs an overlap-aware variant.)
+ */
+function validateDoubleBooking(
+  ctx: ValidationContext,
+  empById: Map<string, Employee>,
+  violations: Violation[],
+): void {
+  const perDay = new Map<string, number>(); // `${employeeId}|${date}` → count
+  for (const a of ctx.assignments) {
+    const key = `${a.employeeId}|${a.date}`;
+    perDay.set(key, (perDay.get(key) ?? 0) + 1);
+  }
+  for (const [key, count] of perDay) {
+    if (count <= 1) continue;
+    const [employeeId, date] = key.split("|") as [string, string];
+    violations.push({
+      kind: "double-booking",
+      ruleName: "Podwójne przydzielenie",
+      message: `${empById.get(employeeId)?.name ?? employeeId}: ${count} zmiany tego samego dnia (${date}).`,
+      date,
+      employeeId,
+    });
+  }
+}
+
+/** Parse "HH:MM" to minutes since midnight (0 if malformed). */
+function startMinutes(time: string): number {
+  const [h, m] = time.split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+/**
+ * Rest period — "doba pracownicza" (labour law). A new working day may not
+ * START earlier in the day than the previous worked day did: after a late
+ * shift you cannot open the next morning (P→R, P→M, M→R are forbidden; R→R,
+ * R→P, R→M, M→M, M→P, P→P are fine). Equivalent to "start-to-start ≥ 24h" for
+ * adjacent days. Applies to ALL employees with no exemptions, and to office
+ * duty too (it starts at 07:30 — P→B is a violation just like P→R).
+ *
+ * The month boundary IS checked: the previous month's last worked day is folded
+ * in, so an afternoon on the 31st followed by a morning on the 1st is caught.
+ */
+function validateRestPeriod(
+  ctx: ValidationContext,
+  empById: Map<string, Employee>,
+  defById: Map<string, ShiftDefinition>,
+  violations: Violation[],
+): void {
+  // Per employee: date → earliest start minutes worked that day (the doba opens
+  // at the first shift, so the earliest start governs).
+  const byEmpDate = new Map<string, Map<string, number>>();
+  const record = (employeeId: string, date: string, start: number) => {
+    let dates = byEmpDate.get(employeeId);
+    if (!dates) byEmpDate.set(employeeId, (dates = new Map()));
+    const prev = dates.get(date);
+    if (prev === undefined || start < prev) dates.set(date, start);
+  };
+  for (const a of ctx.assignments) {
+    const def = defById.get(a.shiftDefId);
+    if (def) record(a.employeeId, a.date, startMinutes(def.startTime));
+  }
+  // Fold in ONLY the previous month's last calendar day, so the boundary pair
+  // is checked without re-flagging violations internal to the previous month.
+  const prevLastDay = addDays(firstDayOf(ctx.month), -1);
+  for (const a of ctx.prevMonthAssignments ?? []) {
+    if (a.date !== prevLastDay) continue;
+    const def = defById.get(a.shiftDefId);
+    if (def) record(a.employeeId, a.date, startMinutes(def.startTime));
+  }
+
+  for (const [employeeId, dates] of byEmpDate) {
+    const sorted = [...dates.keys()].sort();
+    for (let i = 1; i < sorted.length; i++) {
+      const prevDate = sorted[i - 1]!;
+      const date = sorted[i]!;
+      if (addDays(prevDate, 1) !== date) continue; // only adjacent days
+      const prevStart = dates.get(prevDate)!;
+      const start = dates.get(date)!;
+      if (start < prevStart) {
+        violations.push({
+          kind: "rest-period",
+          ruleName: "Doba pracownicza",
+          message:
+            `${empById.get(employeeId)?.name ?? employeeId}: za krótki odpoczynek ${prevDate}→${date} ` +
+            `(start ${fmtTime(start)} po zmianie zaczynającej się ${fmtTime(prevStart)} dnia poprzedniego).`,
+          date,
+          employeeId,
+        });
+      }
+    }
+  }
+}
+
+function fmtTime(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Free weekend (H7): every active employee must have at least one WHOLE free
+ * weekend in the month — a Saturday AND the following Sunday both off, as a
+ * pair. A free Saturday on one weekend plus a free Sunday on another does NOT
+ * count. Only weekends whose both days fall inside the month are considered
+ * (a weekend split across the month boundary can't be guaranteed here).
+ *
+ * Built-in and universal (all groups). If per-group policy or "N free weekends"
+ * is ever needed, this should graduate into a configurable rule kind.
+ */
+function validateFreeWeekend(ctx: ValidationContext, violations: Violation[]): void {
+  const last = lastDayOf(ctx.month);
+  const weekends: [string, string][] = []; // [saturday, sunday], both in-month
+  for (let d = firstDayOf(ctx.month); d <= last; d = addDays(d, 1)) {
+    if (weekdayOfDate(d) !== 6) continue; // Saturday
+    const sunday = addDays(d, 1);
+    if (sunday <= last) weekends.push([d, sunday]);
+  }
+  if (weekends.length === 0) return; // nothing to require
+
+  const workedByEmp = new Map<string, Set<string>>();
+  for (const a of ctx.assignments) {
+    let s = workedByEmp.get(a.employeeId);
+    if (!s) workedByEmp.set(a.employeeId, (s = new Set()));
+    s.add(a.date);
+  }
+
+  for (const emp of ctx.employees) {
+    if (!emp.active) continue;
+    const worked = workedByEmp.get(emp.id) ?? new Set<string>();
+    const hasFree = weekends.some(([sat, sun]) => !worked.has(sat) && !worked.has(sun));
+    if (!hasFree) {
+      violations.push({
+        kind: "free-weekend",
+        ruleName: "Wolny weekend",
+        message: `${emp.name}: brak całego wolnego weekendu (sobota+niedziela) w miesiącu.`,
+        employeeId: emp.id,
+      });
+    }
+  }
+}
+
+/** Weekday of an ISO date in local time (0=Sun … 6=Sat). */
+function weekdayOfDate(iso: string): number {
+  const [y, m, d] = iso.split("-").map(Number) as [number, number, number];
+  return new Date(y, m - 1, d).getDay();
+}
+
+export function effectiveCoverage(
   inst: ShiftInstance,
   def: ShiftDefinition,
   coverageRules: Rule[],
@@ -245,12 +410,17 @@ function checkQualificationCoverage(
   inScope: (i: ShiftInstance) => boolean,
   assignedAt: (i: ShiftInstance) => Employee[],
   rankOf: (e: Employee) => number,
+  effMin: (i: ShiftInstance) => number,
   fail: (v: Omit<Violation, "ruleId" | "ruleName" | "kind">) => void,
 ): void {
   const p = rule.params as RuleParamsQualificationCoverage;
   for (const inst of instances) {
     if (!inScope(inst)) continue;
-    const qualified = assignedAt(inst).filter((e) => rankOf(e) >= p.minQualificationLevel);
+    const present = assignedAt(inst);
+    // An empty OPTIONAL shift (min 0, nobody assigned) has nothing to qualify —
+    // skip it. A staffed shift, or one that is genuinely required, still checks.
+    if (present.length === 0 && effMin(inst) === 0) continue;
+    const qualified = present.filter((e) => rankOf(e) >= p.minQualificationLevel);
     if (qualified.length < p.minCount) {
       fail({
         message: `${inst.date}: ${qualified.length} os. o kwalifikacji ≥ ${p.minQualificationLevel} (wymagane ${p.minCount}).`,
@@ -269,7 +439,18 @@ function checkMaxConsecutive(
 ): void {
   const p = rule.params as RuleParamsMaxConsecutiveDays;
   const exempt = new Set(p.exemptEmployeeIds ?? []);
-  const prevWorked = new Set(ctx.prevMonthWorkedDates ?? []);
+
+  // Previous-month worked dates PER EMPLOYEE — must be per person, not "any day
+  // someone worked", or the carry-in counts the whole previous month for everyone.
+  const prevByEmp = new Map<string, Set<string>>();
+  for (const a of ctx.prevMonthAssignments ?? []) {
+    let s = prevByEmp.get(a.employeeId);
+    if (!s) prevByEmp.set(a.employeeId, (s = new Set()));
+    s.add(a.date);
+  }
+
+  const first = firstDayOf(ctx.month);
+  const last = lastDayOf(ctx.month);
 
   for (const emp of ctx.employees) {
     if (!groups.has(emp.staffGroup) || exempt.has(emp.id)) continue;
@@ -278,19 +459,21 @@ function checkMaxConsecutive(
     );
     if (workedDates.size === 0) continue;
 
-    // Seed carry-in run from the tail of the previous month.
+    // Carry-in: consecutive days THIS employee worked ending the day before the 1st.
+    const prevWorked = prevByEmp.get(emp.id) ?? new Set<string>();
     let carryIn = 0;
-    let cursor = firstDayOf(ctx.month);
-    let probe = addDays(cursor, -1);
+    let probe = addDays(first, -1);
     while (prevWorked.has(probe)) {
       carryIn++;
       probe = addDays(probe, -1);
     }
 
+    // Walk the month day by day; a gap resets the run. maxRun starts at 0 so a
+    // run that lives entirely in the previous month (this month off) isn't
+    // re-flagged here — only runs reaching into this month count.
     let run = carryIn;
-    let maxRun = carryIn;
-    const last = lastDayOf(ctx.month);
-    for (let d = cursor; d <= last; d = addDays(d, 1)) {
+    let maxRun = 0;
+    for (let d = first; d <= last; d = addDays(d, 1)) {
       run = workedDates.has(d) ? run + 1 : 0;
       if (run > maxRun) maxRun = run;
     }
