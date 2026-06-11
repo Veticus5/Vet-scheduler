@@ -131,6 +131,23 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       );
     `,
   },
+  {
+    // Seed the office-duty shift "B" (dyżur biurowy): 07:30–15:30, does NOT staff
+    // the reception desk (staffs_reception = 0). Counts as worked hours and is
+    // subject to the rest period / consecutive-days checks, but carries no desk
+    // coverage — used for the manager/deputy office days (zasady §5), which the
+    // CP-SAT generator places. OR IGNORE so a dev/working-copy that already seeded
+    // it by hand doesn't conflict. required_min 0 (optional), max 2.
+    version: 6,
+    sql: `
+      INSERT OR IGNORE INTO shift_definitions
+        (id, staff_group, name, start_time, end_time, weekdays, required_min, required_max, staffs_reception)
+      VALUES (
+        'office-duty-b', 'reception', 'Dyżur biurowy', '07:30', '15:30',
+        '[1,2,3,4,5,6,0]', 0, 2, 0
+      );
+    `,
+  },
 ];
 
 /**
