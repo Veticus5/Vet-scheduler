@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Assignment, Employee, FeasibilityReport, ShiftInstance, ValidationResult } from "@vet/shared";
+import { countWorkdayVacationDays, monthlyTargetHours } from "@vet/shared";
 import { api } from "../api";
 import { Banner, WEEKDAY_LABELS, currentMonth, groupLabel, useLoader } from "../common";
 
@@ -66,8 +67,11 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
     return set;
   }, [validation]);
 
-  // H8 — hours worked vs contract norm (advisory). Norm is reduced by 8h per
-  // time-off (urlop) day; "unavailable" is not deducted (it isn't paid leave).
+  // H8 — hours worked vs the statutory monthly norm (advisory). The norm is the
+  // art. 130 KP figure for this month (NOT a flat 160 — it ranges 160–184h),
+  // reduced by 8h per VACATION day on a working day (Mon–Fri); weekend urlop and
+  // "unavailable" are not deducted.
+  const [normYear, normMonth] = month.split("-").map(Number) as [number, number];
   const hoursRows = useMemo(() => {
     const duration = (shiftDefId: string) => {
       const d = defById.get(shiftDefId);
@@ -93,10 +97,19 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
         id: e.id,
         name: e.name,
         worked: worked.get(e.id) ?? 0,
-        norm: Math.max(0, e.contractHours - 8 * (timeOffDays.get(e.id)?.size ?? 0)),
+        // fte from contractHours/160 (full-time = 160); minus Mon–Fri vacation.
+        norm: Math.max(
+          0,
+          monthlyTargetHours(
+            normYear,
+            normMonth,
+            e.contractHours / 160,
+            countWorkdayVacationDays(timeOffDays.get(e.id) ?? []),
+          ),
+        ),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [assignments, employees, defById, requests]);
+  }, [assignments, employees, defById, requests, normYear, normMonth]);
 
   const generate = async () => {
     setBusy(true);
@@ -251,8 +264,10 @@ export function SchedulePage({ hasApiKey, goSettings }: { hasApiKey: boolean; go
         <div className="panel">
           <h3>Godziny vs norma (informacyjnie)</h3>
           <p className="muted" style={{ marginTop: 0 }}>
-            Norma godzin nie jest twardo egzekwowana — to podgląd. Norma uwzględnia urlopy (wolne):
-            −8 h za dzień; niedostępność nie jest odejmowana. Żółto oznaczone odchylenie powyżej {HOURS_TOLERANCE} h.
+            Norma godzin nie jest twardo egzekwowana — to podgląd. Norma to wymiar czasu pracy
+            dla tego miesiąca (art. 130 KP, 160–184 h w zależności od świąt), pomniejszony o 8 h
+            za każdy dzień urlopu wypadający w dzień roboczy (pon–pt); urlop w weekend i niedostępność
+            nie obniżają normy. Żółto oznaczone odchylenie powyżej {HOURS_TOLERANCE} h.
           </p>
           <table>
             <thead>

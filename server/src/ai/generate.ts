@@ -9,7 +9,12 @@ import type {
   ValidationResult,
   Violation,
 } from "@vet/shared";
-import { isMachineValidated, QUALIFICATION_TIERS } from "@vet/shared";
+import {
+  countWorkdayVacationDays,
+  isMachineValidated,
+  monthlyTargetHours,
+  QUALIFICATION_TIERS,
+} from "@vet/shared";
 import { HttpError } from "../http";
 import { getApiKey, getSettings } from "../repos/settings";
 import { rankMap } from "../repos/qualifications";
@@ -101,13 +106,17 @@ function buildContextPayload(input: GenerateInput) {
   const tierLabel = (group: Employee["staffGroup"], key: string) =>
     QUALIFICATION_TIERS[group].find((t) => t.key === key)?.label ?? key;
 
-  // Time-off days per employee → reduce each person's monthly target.
-  const timeOffDays = new Map<string, number>();
+  // Vacation (time-off) dates per employee → reduce each person's monthly
+  // target by 8h per Mon–Fri day (art. 130 KP). Weekend urlop deducts nothing.
+  const timeOffDates = new Map<string, Set<string>>();
   for (const r of input.requests) {
     if (r.type !== "time-off") continue;
-    timeOffDays.set(r.employeeId, (timeOffDays.get(r.employeeId) ?? 0) + new Set(r.dates ?? []).size);
+    let s = timeOffDates.get(r.employeeId);
+    if (!s) timeOffDates.set(r.employeeId, (s = new Set()));
+    for (const d of r.dates ?? []) s.add(d);
   }
   const SHIFT_HOURS = 8; // reception shift length, for the hours→shifts target
+  const [normYear, normMonth] = input.month.split("-").map(Number) as [number, number];
 
   return {
     month: input.month,
@@ -116,7 +125,15 @@ function buildContextPayload(input: GenerateInput) {
     employees: input.employees
       .filter((e) => e.active)
       .map((e) => {
-        const targetHours = Math.max(0, e.contractHours - SHIFT_HOURS * (timeOffDays.get(e.id) ?? 0));
+        const targetHours = Math.max(
+          0,
+          monthlyTargetHours(
+            normYear,
+            normMonth,
+            e.contractHours / 160,
+            countWorkdayVacationDays(timeOffDates.get(e.id) ?? []),
+          ),
+        );
         return {
           id: e.id,
           name: e.name,
@@ -350,10 +367,14 @@ function hoursDeviationLines(input: GenerateInput, assignments: Assignment[]): s
     const def = defById.get(a.shiftDefId);
     if (def) worked.set(a.employeeId, (worked.get(a.employeeId) ?? 0) + shiftHours(def));
   }
+  const [ny, nm] = input.month.split("-").map(Number) as [number, number];
   const lines: string[] = [];
   for (const e of input.employees) {
     if (!e.active) continue;
-    const target = Math.max(0, e.contractHours - 8 * (timeOffDays.get(e.id)?.size ?? 0));
+    const target = Math.max(
+      0,
+      monthlyTargetHours(ny, nm, e.contractHours / 160, countWorkdayVacationDays(timeOffDays.get(e.id) ?? [])),
+    );
     const diff = Math.round((worked.get(e.id) ?? 0) - target);
     if (Math.abs(diff) > 8) lines.push(`${e.name}: ${diff > 0 ? "+" : ""}${diff}h (cel ${Math.round(target)}h)`);
   }

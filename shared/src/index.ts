@@ -2,6 +2,10 @@
 // Foundation layer: generic and group-agnostic. Department specifics
 // (reception/doctors/technicians) are layered on later via their own changes.
 
+// Monthly working-time norm (art. 130 KP) — shared by the UI hours table and
+// the server, the TS twin of solver/norm.py.
+export * from "./norm";
+
 // ---------------------------------------------------------------------------
 // Staff groups — first-class, referenceable concept (tasks 3.3, 3.4).
 // ---------------------------------------------------------------------------
