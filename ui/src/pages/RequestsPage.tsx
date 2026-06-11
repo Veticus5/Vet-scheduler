@@ -15,13 +15,47 @@ const TYPE_LABELS: Record<RequestType, string> = {
   freeform: "Dowolny tekst (AI)",
 };
 
-type DateMode = "dates" | "recurrence";
+// How the request's days are entered. All but "recurrence" resolve to an
+// explicit `dates` list at submit, so the stored data model is unchanged.
+type DateMode = "dates" | "range" | "except" | "recurrence";
+
+const DATE_MODE_LABELS: Record<DateMode, string> = {
+  dates: "Konkretne daty",
+  range: "Zakres (od–do)",
+  except: "Cały miesiąc oprócz…",
+  recurrence: "Powtarzalnie (dni tygodnia)",
+};
 
 // Monday-first display order for the weekday toggles.
 const WEEKDAY_ORDER: Weekday[] = [1, 2, 3, 4, 5, 6, 0];
 
 const orderWeekdays = (wd: Weekday[]): Weekday[] => WEEKDAY_ORDER.filter((d) => wd.includes(d));
 const weekdaysText = (wd: Weekday[]): string => orderWeekdays(wd).map((d) => WEEKDAY_LABELS[d]).join(", ");
+
+/** All YYYY-MM-DD dates of a YYYY-MM month, in order. */
+function datesInMonth(month: string): string[] {
+  const [y, m] = month.split("-").map(Number) as [number, number];
+  const n = new Date(y, m, 0).getDate();
+  return Array.from({ length: n }, (_, i) => `${month}-${String(i + 1).padStart(2, "0")}`);
+}
+
+/** Inclusive date range within the month; tolerates reversed bounds. */
+function expandRange(month: string, from: string, to: string): string[] {
+  if (!from || !to) return [];
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  return datesInMonth(month).filter((d) => d >= lo && d <= hi);
+}
+
+/** Parse a comma/space separated day list into in-month YYYY-MM-DD dates.
+ *  Accepts bare day numbers ("11, 12") or full dates ("2026-07-11"). */
+function parseDayList(month: string, raw: string): string[] {
+  const out = new Set<string>();
+  for (const tok of raw.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(tok)) out.add(tok);
+    else if (/^\d{1,2}$/.test(tok)) out.add(`${month}-${tok.padStart(2, "0")}`);
+  }
+  return datesInMonth(month).filter((d) => out.has(d)); // keep in-month + ordered
+}
 
 export function RequestsPage() {
   const [month, setMonth] = useState(currentMonth());
@@ -33,6 +67,8 @@ export function RequestsPage() {
   const [type, setType] = useState<RequestType>("time-off");
   const [dateMode, setDateMode] = useState<DateMode>("dates");
   const [datesText, setDatesText] = useState("");
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
   const [weekdays, setWeekdays] = useState<Weekday[]>([]);
   const [shiftDefIds, setShiftDefIds] = useState<string[]>([]);
   const [text, setText] = useState("");
@@ -49,6 +85,8 @@ export function RequestsPage() {
     setType("time-off");
     setDateMode("dates");
     setDatesText("");
+    setRangeFrom("");
+    setRangeTo("");
     setWeekdays([]);
     setShiftDefIds([]);
     setText("");
@@ -68,29 +106,41 @@ export function RequestsPage() {
       setDatesText((r.dates ?? []).join(", "));
       setWeekdays([]);
     }
+    setRangeFrom("");
+    setRangeTo("");
     setShiftDefIds(r.shiftDefIds ?? []);
     setText(r.text ?? "");
   };
 
   const toggleWeekday = (d: Weekday) =>
     setWeekdays((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]));
+  const toggleShift = (id: string) =>
+    setShiftDefIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  // Resolve the chosen date mode to the concrete day list stored on the request.
+  const resolveDates = (): string[] => {
+    if (type === "freeform") return [];
+    if (dateMode === "range") return expandRange(month, rangeFrom, rangeTo);
+    if (dateMode === "except") {
+      const keep = new Set(parseDayList(month, datesText));
+      return datesInMonth(month).filter((d) => !keep.has(d)); // whole month except listed
+    }
+    return parseDayList(month, datesText); // "dates"
+  };
 
   const submit = async () => {
     const emp = employeeId || employees?.[0]?.id;
     if (!emp) return setError("Najpierw dodaj pracowników");
     const recurring = type !== "freeform" && dateMode === "recurrence";
-    const dates = datesText
-      .split(",")
-      .map((d) => d.trim())
-      .filter(Boolean);
+    const dates = resolveDates();
     const input: ScheduleRequestInput = {
       month,
       employeeId: emp,
       type,
       ...(recurring
         ? { recurrence: weekdays.length ? { weekdays } : undefined }
-        : { dates: type !== "freeform" && dates.length ? dates : undefined }),
-      shiftDefIds: shiftDefIds.length ? shiftDefIds : undefined,
+        : { dates: dates.length ? dates : undefined }),
+      shiftDefIds: type !== "freeform" && shiftDefIds.length ? shiftDefIds : undefined,
       text: text.trim() || undefined,
     };
     try {
@@ -167,7 +217,14 @@ export function RequestsPage() {
   const whenText = (r: { dates?: string[]; recurrence?: { weekdays: Weekday[] }; shiftDefIds?: string[] }): string => {
     const parts: string[] = [];
     if (r.recurrence?.weekdays?.length) parts.push(`Powtarza się: ${weekdaysText(r.recurrence.weekdays)}`);
-    else if (r.dates?.length) parts.push(r.dates.join(", "));
+    else if (r.dates?.length) {
+      // Long lists (e.g. "whole month except…") collapse to a count + range.
+      parts.push(
+        r.dates.length > 6
+          ? `${r.dates.length} dni (${r.dates[0]!.slice(-2)}–${r.dates[r.dates.length - 1]!.slice(-2)})`
+          : r.dates.map((d) => d.slice(-2)).join(", "),
+      );
+    }
     if (r.shiftDefIds?.length) parts.push(`zmiany: ${r.shiftDefIds.map(shiftName).join(", ")}`);
     return parts.join(" · ");
   };
@@ -258,8 +315,9 @@ export function RequestsPage() {
             <div className="field">
               <label>Kiedy</label>
               <select value={dateMode} onChange={(e) => setDateMode(e.target.value as DateMode)}>
-                <option value="dates">Konkretne daty</option>
-                <option value="recurrence">Powtarzalnie (dni tygodnia)</option>
+                {(Object.keys(DATE_MODE_LABELS) as DateMode[]).map((m) => (
+                  <option key={m} value={m}>{DATE_MODE_LABELS[m]}</option>
+                ))}
               </select>
             </div>
           )}
@@ -267,8 +325,37 @@ export function RequestsPage() {
 
         {type !== "freeform" && dateMode === "dates" && (
           <div className="field" style={{ marginTop: 8 }}>
-            <label>Daty (RRRR-MM-DD, po przecinku)</label>
-            <input value={datesText} onChange={(e) => setDatesText(e.target.value)} placeholder={`${month}-05, ${month}-06`} />
+            <label>Daty (numery dni „11, 12" lub pełne „{month}-11", po przecinku)</label>
+            <input value={datesText} onChange={(e) => setDatesText(e.target.value)} placeholder={`5, 6  lub  ${month}-05`} />
+          </div>
+        )}
+
+        {type !== "freeform" && dateMode === "range" && (
+          <div className="row" style={{ marginTop: 8 }}>
+            <div className="field">
+              <label>Od</label>
+              <input type="date" min={`${month}-01`} value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Do</label>
+              <input type="date" min={`${month}-01`} value={rangeTo} onChange={(e) => setRangeTo(e.target.value)} />
+            </div>
+            {rangeFrom && rangeTo && (
+              <p className="muted" style={{ alignSelf: "flex-end" }}>
+                {expandRange(month, rangeFrom, rangeTo).length} dni
+              </p>
+            )}
+          </div>
+        )}
+
+        {type !== "freeform" && dateMode === "except" && (
+          <div className="field" style={{ marginTop: 8 }}>
+            <label>Dni-wyjątki (prośba obejmie CAŁY miesiąc OPRÓCZ tych dni)</label>
+            <input value={datesText} onChange={(e) => setDatesText(e.target.value)} placeholder="11, 12" />
+            <p className="muted" style={{ marginTop: 4 }}>
+              Np. niedostępność „cały lipiec oprócz 11, 12" = pracuje tylko 11 i 12.
+              {datesText.trim() && ` → ${resolveDates().length} dni objętych prośbą.`}
+            </p>
           </div>
         )}
 
@@ -287,14 +374,34 @@ export function RequestsPage() {
                 </button>
               ))}
             </div>
-            {shiftDefIds.length > 0 && (
-              <p className="muted" style={{ marginTop: 4 }}>Zmiany: {shiftDefIds.map(shiftName).join(", ")}</p>
-            )}
+          </div>
+        )}
+
+        {type !== "freeform" && (
+          <div className="field" style={{ marginTop: 8 }}>
+            <label>Ogranicz do zmian (opcjonalnie — puste = wszystkie zmiany)</label>
+            <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+              {(shifts ?? []).map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={shiftDefIds.includes(s.id) ? "primary" : ""}
+                  onClick={() => toggleShift(s.id)}
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+            <p className="muted" style={{ marginTop: 4 }}>
+              {type === "preferred"
+                ? "Np. „preferuje na poranną” — zaznacz Porannę."
+                : "Np. „w tygodniu tylko popołudnia” — typ Niedostępność, dni tygodnia pon–pt, zaznacz Poranną i Międzyzmianę."}
+            </p>
           </div>
         )}
 
         <div className="field" style={{ marginTop: 8 }}>
-          <label>Tekst {type === "freeform" ? "(wymagany)" : "(opcjonalny)"}</label>
+          <label>Tekst {type === "freeform" ? "(wymagany)" : "(opcjonalny — notatka)"}</label>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} style={{ width: "100%" }} />
         </div>
         <div className="row" style={{ marginTop: 8 }}>
