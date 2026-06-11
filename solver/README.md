@@ -27,8 +27,30 @@ ocenia wynik niezależnie. Walidator i ścieżka LLM pozostają nietknięte.
   obsady desku). **Uwaga:** migracji produkcyjnej `B` jeszcze NIE ma — na krok 3
   seedujemy `B` tylko w kopii roboczej (patrz niżej); migracja wejdzie w kroku 4.
 
-Pozostaje (krok 4): migracja `B` + przełącznik „Wygeneruj" na solver za flagą.
+- **Krok 4 (wpięcie w aplikację):** zrobione.
+  - Migracja v6 seeduje `B` w produkcji (`server/src/db/migrate.ts`).
+  - `server/src/solver/run.ts` woła solver jako child process; endpoint generacji
+    wybiera silnik wg `settings.generatorEngine` (`solver` domyślnie / `llm` za
+    flagą). Przełącznik w Ustawieniach UI.
+  - Solver pakowany PyInstallerem do `dist/solver/solver.exe` (one-folder),
+    wysyłany obok `dist/vet-scheduler.exe`; serwer w trybie skompilowanym woła
+    `dist/solver/solver.exe`, w dev — `solve.py` (patrz `VET_SOLVER_PYTHON`).
+
 Mapowanie constraintów na walidator — patrz docstring w [`solve.py`](solve.py).
+
+## Build produkcyjny
+
+```bash
+# wymaga venv z zależnościami (patrz Setup) + PyInstaller:
+solver/.venv/Scripts/python.exe -m pip install pyinstaller
+
+bun run build:dist     # = build:exe (aplikacja Bun) + build:solver (solver.exe)
+# wynik: dist/vet-scheduler.exe  +  dist/solver/solver.exe  (~165 MB przez ortools)
+```
+
+`dist/` jest w `.gitignore` — bundla nie commitujemy. Start solver.exe ~3 s
+(bootloader + import ortools), rozwiązanie <1 s. Override komendy solvera:
+`VET_SOLVER_CMD` (JSON argv), w dev interpreter: `VET_SOLVER_PYTHON`.
 
 ## Setup (jednorazowo)
 

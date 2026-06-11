@@ -13,6 +13,8 @@
     "dev:ui": "bun run --cwd ui dev",
     "build:ui": "bun run --cwd ui build",
     "build:exe": "bun run build:ui && bun run --cwd server build:exe",
+    "build:solver": "solver/.venv/Scripts/python.exe -m PyInstaller --noconfirm --name solver --distpath dist --workpath solver/.build --specpath solver --collect-all ortools --collect-all holidays solver/solve.py",
+    "build:dist": "bun run build:exe && bun run build:solver",
     "start": "bun run --cwd server start",
     "test": "bun test"
   }
