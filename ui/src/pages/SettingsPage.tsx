@@ -34,11 +34,34 @@ export function SettingsPage({ onChange }: { onChange: (s: Settings) => void }) 
     reload();
   };
 
+  const saveEngine = async (generatorEngine: "solver" | "llm") => {
+    const s = await api.updateSettings({ generatorEngine });
+    onChange(s);
+    reload();
+  };
+
   return (
     <div>
       <h2>Ustawienia</h2>
       {error && <Banner kind="error">{error}</Banner>}
       {saved && <Banner kind="ok">{saved}</Banner>}
+
+      <div className="panel">
+        <h3>Generator grafiku</h3>
+        <p className="muted">
+          Solver (CP-SAT) układa grafik deterministycznie i spełnia twarde reguły z definicji.
+          Ścieżka AI (LLM) pozostaje dostępna do porównania.
+        </p>
+        <select value={settings.generatorEngine} onChange={(e) => saveEngine(e.target.value as "solver" | "llm")}>
+          <option value="solver">Solver (CP-SAT) — zalecany</option>
+          <option value="llm">AI (LLM) — porównawczo</option>
+        </select>
+        {settings.generatorEngine === "llm" && (
+          <p className="muted" style={{ marginBottom: 0 }}>
+            Tryb AI wymaga klucza API i bywa wolniejszy oraz mniej dokładny.
+          </p>
+        )}
+      </div>
 
       <div className="panel">
         <h3>Klucz API Anthropic</h3>

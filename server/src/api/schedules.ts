@@ -13,6 +13,8 @@ import {
 } from "../repos/schedules";
 import { validate, type ValidationContext } from "../domain/validator";
 import { generateSchedule } from "../ai/generate";
+import { generateScheduleViaSolver } from "../solver/run";
+import { getSettings } from "../repos/settings";
 import type { Route } from "./index";
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -78,14 +80,19 @@ export const scheduleRoutes: Route[] = [
       // (slow model + repair attempts) and a plain response would be killed
       // by the connection idle timeout.
       return streamJob(async () => {
-        const result = await generateSchedule({
+        const generateInput = {
           month,
           employees: listEmployees(),
           shiftDefs: listShifts(),
           rules: listEnabledRules(),
           requests: listRequests(month),
           prevMonthAssignments: assignmentsOf(previousMonth(month)),
-        });
+        };
+        // Engine flag: CP-SAT solver (default) or the legacy LLM path.
+        const result =
+          getSettings().generatorEngine === "llm"
+            ? await generateSchedule(generateInput)
+            : await generateScheduleViaSolver(generateInput);
         const schedule = saveSchedule(
           month,
           result.assignments,

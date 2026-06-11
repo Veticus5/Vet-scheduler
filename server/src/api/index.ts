@@ -26,7 +26,11 @@ const routes: Route[] = [
     method: "PUT",
     path: "/settings",
     handler: async (req) => {
-      const body = await readJson<{ aiModel?: string; maxRepairAttempts?: number }>(req);
+      const body = await readJson<{
+        aiModel?: string;
+        maxRepairAttempts?: number;
+        generatorEngine?: "solver" | "llm";
+      }>(req);
       updateSettings(body);
       return json(getSettings());
     },

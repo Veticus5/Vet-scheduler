@@ -305,15 +305,22 @@ export interface FeasibilityReport {
 // Settings
 // ---------------------------------------------------------------------------
 
+/** Which generator builds the schedule: the CP-SAT solver or the legacy LLM. */
+export type GeneratorEngine = "solver" | "llm";
+
 export interface Settings {
   /** Whether an Anthropic API key is stored (the key itself is never returned). */
   hasApiKey: boolean;
   aiModel: string;
   maxRepairAttempts: number;
+  /** Generator engine. Defaults to the CP-SAT solver; the LLM path stays
+   *  available behind this flag for comparison. */
+  generatorEngine: GeneratorEngine;
 }
 
 export const DEFAULT_AI_MODEL = "claude-opus-4-8";
 export const DEFAULT_MAX_REPAIR_ATTEMPTS = 3;
+export const DEFAULT_GENERATOR_ENGINE: GeneratorEngine = "solver";
 
 export const AI_MODELS: { id: string; label: string }[] = [
   { id: "claude-opus-4-8", label: "Claude Opus 4.8 (najlepsza jakość)" },

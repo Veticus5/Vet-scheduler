@@ -84,7 +84,7 @@ async function reqStream<T>(path: string): Promise<T> {
 export const api = {
   // settings
   getSettings: () => req<Settings>("GET", "/settings"),
-  updateSettings: (p: { aiModel?: string; maxRepairAttempts?: number }) =>
+  updateSettings: (p: { aiModel?: string; maxRepairAttempts?: number; generatorEngine?: "solver" | "llm" }) =>
     req<Settings>("PUT", "/settings", p),
   setApiKey: (apiKey: string) => req<Settings>("PUT", "/settings/api-key", { apiKey }),
 
