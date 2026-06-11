@@ -14,6 +14,7 @@
 import type { Assignment, Employee, Rule, ScheduleRequest, ShiftDefinition } from "@vet/shared";
 import { datesOfMonth, weekdayOf } from "../domain/calendar";
 import { effectiveCoverage } from "../domain/validator";
+import { proposeOfficeDays, type OfficeProposal } from "./office";
 
 export interface SolverEmployee {
   id: string;
@@ -36,8 +37,12 @@ export interface SolverInstance {
   shiftDefId: string;
   effMin: number;
   effMax: number;
+  /** True for reception-desk shifts (coverage + qualification apply); false for
+   *  office duty (counts as worked hours, but no desk coverage/qualification). */
+  desk: boolean;
   /** Ids of employees who may legally be assigned here (availability + not
-   *  blocked by a hard time-off/unavailable request). Mirrors feasibility.ts. */
+   *  blocked by a hard time-off/unavailable request). Mirrors feasibility.ts.
+   *  Office-duty instances are restricted to the manager/deputy (rank ≥ 3). */
   eligible: string[];
 }
 
@@ -63,6 +68,9 @@ export interface SolverPayload {
   /** `preferred` requests (soft): satisfied if the employee works one of `dates`
    *  (on one of `shiftDefIds` when given). Each unmet request is penalised W_pref. */
   preferred: { employeeId: string; dates: string[]; shiftDefIds: string[] }[];
+  /** Proposed office-duty days (manager/deputy) from the §5 heuristic. The solver
+   *  rewards placing the office shift on these (employee, date) pairs (W_office). */
+  officeProposals: OfficeProposal[];
   /** Objective weights. W_hours dominates; W_slack is a huge penalty so coverage
    *  slack is used only when a month is genuinely understaffed. `balance` is an
    *  optional max-over-target hours-fairness term (0 = off). */
@@ -81,6 +89,7 @@ export interface SolverPayload {
 export const DEFAULT_WEIGHTS = {
   hours: 10,
   pref: 8,
+  office: 6,
   weekend: 4,
   shiftBalance: 2,
   mid: 1,
@@ -184,17 +193,21 @@ export function buildSolverPayload(
     const wd = weekdayOf(date);
     for (const def of receptionDefs) {
       if (!def.weekdays.includes(wd)) continue;
+      const desk = def.staffsReception !== false;
       const inst = { date, shiftDefId: def.id, staffGroup: def.staffGroup };
       const { min, max } = effectiveCoverage(inst, def, coverageRules);
       const eligible: string[] = [];
       for (const e of active) {
+        // Office duty (B) is for the manager/deputy only (rank ≥ 3); §5 allows
+        // exceptions, but the default proposal keeps it to those two roles.
+        if (!desk && rankOf(e) < 3) continue;
         const avail = e.defaultAvailability[wd];
         if (avail !== undefined && !avail.includes(def.id)) continue;
         if (blockedDate.has(`${e.id}|${date}`)) continue;
         if (blockedShift.has(`${e.id}|${date}|${def.id}`)) continue;
         eligible.push(e.id);
       }
-      instances.push({ date, shiftDefId: def.id, effMin: min, effMax: max, eligible });
+      instances.push({ date, shiftDefId: def.id, effMin: min, effMax: max, desk, eligible });
     }
   }
 
@@ -263,6 +276,14 @@ export function buildSolverPayload(
     .filter((r) => r.type === "preferred" && (r.dates?.length ?? 0) > 0)
     .map((r) => ({ employeeId: r.employeeId, dates: r.dates ?? [], shiftDefIds: r.shiftDefIds ?? [] }));
 
+  // ---- Office-day proposals (phase 1, §5 heuristic): manager = rank 4, deputy
+  //      = rank 3. Skip days the person is on whole-day time-off/unavailable. ----
+  const manager = active.find((e) => rankOf(e) >= 4)?.id ?? null;
+  const deputy = active.find((e) => rankOf(e) === 3)?.id ?? null;
+  const officeProposals = proposeOfficeDays(month, manager, deputy, (emp, date) =>
+    blockedDate.has(`${emp}|${date}`),
+  );
+
   // ---- Qualification-coverage rule (rank≥minLevel, ≥minCount) ----
   const qualRule = input.rules.find((r) => r.enabled && r.kind === "qualification-coverage");
   const qualification = qualRule
@@ -285,6 +306,7 @@ export function buildSolverPayload(
     tuesdays,
     qualification,
     preferred,
+    officeProposals,
     weights: { ...DEFAULT_WEIGHTS, ...weightOverrides },
   };
 }

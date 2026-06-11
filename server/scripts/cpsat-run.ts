@@ -139,21 +139,28 @@ if (result.slacks.length === 0) console.log(`Coverage slacks: none (every shift 
 else for (const s of result.slacks) console.log(`  SLACK ${s.date} ${defName.get(s.shiftDefId)}: −${s.missing} osoba`);
 
 // Worked-weekend distribution + morning/afternoon balance per person.
-const morning = new Set(payload.shiftDefs.filter((d) => d.startMin < 540).map((d) => d.id));
-const afternoon = new Set(payload.shiftDefs.filter((d) => d.startMin >= 780).map((d) => d.id));
+const officeIds = new Set(payload.instances.filter((i) => !i.desk).map((i) => i.shiftDefId));
+const morning = new Set(payload.shiftDefs.filter((d) => d.startMin < 540 && !officeIds.has(d.id)).map((d) => d.id));
+const afternoon = new Set(payload.shiftDefs.filter((d) => d.startMin >= 780 && !officeIds.has(d.id)).map((d) => d.id));
 const worked = new Map<string, Set<string>>();
 const cntR = new Map<string, number>();
 const cntP = new Map<string, number>();
+const cntB = new Map<string, number>();
 for (const a of result.assignments) {
   (worked.get(a.employeeId) ?? worked.set(a.employeeId, new Set()).get(a.employeeId)!).add(a.date);
   if (morning.has(a.shiftDefId)) cntR.set(a.employeeId, (cntR.get(a.employeeId) ?? 0) + 1);
   if (afternoon.has(a.shiftDefId)) cntP.set(a.employeeId, (cntP.get(a.employeeId) ?? 0) + 1);
+  if (officeIds.has(a.shiftDefId)) cntB.set(a.employeeId, (cntB.get(a.employeeId) ?? 0) + 1);
 }
-console.log(`\nweekends worked / morning(R) / afternoon(P) per person:`);
+const proposedBy = new Map<string, number>();
+for (const p of payload.officeProposals) proposedBy.set(p.employeeId, (proposedBy.get(p.employeeId) ?? 0) + 1);
+console.log(`\nweekends / morning(R) / afternoon(P) / office(B placed÷proposed) per person:`);
 for (const e of payload.employees) {
   const w = worked.get(e.id) ?? new Set();
   const wk = payload.weekends.filter(([sa, su]) => w.has(sa) || w.has(su)).length;
-  console.log(`  ${empName.get(e.id)!.padEnd(24)} wk ${wk}  R ${cntR.get(e.id) ?? 0}  P ${cntP.get(e.id) ?? 0}`);
+  const prop = proposedBy.get(e.id) ?? 0;
+  const officeStr = prop > 0 || (cntB.get(e.id) ?? 0) > 0 ? `  B ${cntB.get(e.id) ?? 0}/${prop}` : "";
+  console.log(`  ${empName.get(e.id)!.padEnd(24)} wk ${wk}  R ${cntR.get(e.id) ?? 0}  P ${cntP.get(e.id) ?? 0}${officeStr}`);
 }
 
 // ---- Verdict ----

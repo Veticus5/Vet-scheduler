@@ -116,6 +116,8 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     if qual:
         min_level, min_count = qual["minLevel"], qual["minCount"]
         for inst in instances:
+            if not inst["desk"]:
+                continue  # office duty doesn't staff the desk (matches validator)
             d, s = inst["date"], inst["shiftDefId"]
             present = [x[(e, d, s)] for e in inst["eligible"] if (e, d, s) in x]
             if not present:
@@ -191,10 +193,14 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         m.Add(expr - target == pos - neg)
         return pos + neg
 
-    # Per-employee shift vars by type (morning / afternoon / midshift).
-    morning = {d["id"] for d in payload["shiftDefs"] if d["startMin"] < 540}
-    afternoon = {d["id"] for d in payload["shiftDefs"] if d["startMin"] >= 780}
-    midshift = {d["id"] for d in payload["shiftDefs"] if 540 <= d["startMin"] < 780}
+    # Desk shift ids by type (morning / afternoon / midshift). Office duty (B) is
+    # excluded — it starts 07:30 but is NOT a morning desk shift.
+    office_shift_ids = {inst["shiftDefId"] for inst in instances if not inst["desk"]}
+    desk_defs = [d for d in payload["shiftDefs"] if d["id"] not in office_shift_ids]
+    morning = {d["id"] for d in desk_defs if d["startMin"] < 540}
+    afternoon = {d["id"] for d in desk_defs if d["startMin"] >= 780}
+    midshift = {d["id"] for d in desk_defs if 540 <= d["startMin"] < 780}
+    desk_shift_ids = [d["id"] for d in desk_defs]
 
     # W_hours — deviation from the art.130 target (+ optional max-over fairness).
     hours_dev, over_terms = [], []
@@ -215,6 +221,15 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     # W_slack — huge penalty so understaffing is a last resort.
     if slack_vars:
         obj.append(w["slack"] * sum(s for _, s in slack_vars))
+
+    # W_office — reward placing the office shift on the proposed (employee, date)
+    # days from the §5 heuristic. Soft: the solver drops a proposal only when desk
+    # coverage (hard, slack-penalised at 10000) couldn't otherwise hold.
+    for idx, prop in enumerate(payload.get("officeProposals", [])):
+        e, d = prop["employeeId"], prop["date"]
+        lits = [x[(e, d, s)] for s in office_shift_ids if (e, d, s) in x]
+        if lits:
+            obj.append(w["office"] * (1 - sum(lits)))
 
     # W_pref — one penalty per unmet `preferred` request. Satisfied if the person
     # works one of the requested dates (on a requested shift when shiftDefIds set).
@@ -263,7 +278,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     mgr = [e for e in emp_ids if rank_of.get(e, 0) >= 4]
     dep = [e for e in emp_ids if rank_of.get(e, 0) == 3]
     for d in payload.get("tuesdays", []):
-        for s in shift_ids:
+        for s in desk_shift_ids:
             mv = [x[(e, d, s)] for e in mgr if (e, d, s) in x]
             dv = [x[(e, d, s)] for e in dep if (e, d, s) in x]
             if not mv or not dv:

@@ -56,6 +56,10 @@ const startMin = (t: string) => {
 };
 const codeOf = new Map<string, string>();
 for (const d of shiftDefs) {
+  if (d.staffsReception === false) {
+    codeOf.set(d.id, "B"); // office duty
+    continue;
+  }
   const s = startMin(d.startTime);
   codeOf.set(d.id, s < 540 ? "R" : s < 780 ? "M" : "P");
 }

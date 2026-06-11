@@ -19,8 +19,16 @@ ocenia wynik niezależnie. Walidator i ścieżka LLM pozostają nietknięte.
   sprawiedliwość max-nadwyżki godzin, domyślnie 0).
 - Norma godzin: dynamiczna, art. 130 KP (`norm.py`), nie stała 160.
 
-Pozostaje (kroki 3–4): dni biurowe + przełącznik w UI. Mapowanie constraintów na
-walidator — patrz docstring w [`solve.py`](solve.py).
+- **Krok 3 (dni biurowe):** dwufazowo. Faza 1 — `server/src/solver/office.ts`
+  (`proposeOfficeDays`) wyznacza dni biurowe kierownika/zastępcy z heurystyki §5
+  zasad. Faza 2 — solver nagradza je (`W_office`) i układa desk wokół; oddaje
+  proponowany dzień tylko, gdy inaczej padłaby obsada. Dyżur biurowy `B` to
+  realna zmiana `staffsReception=0` (liczy się do godzin/doby/dni-z-rzędu, nie do
+  obsady desku). **Uwaga:** migracji produkcyjnej `B` jeszcze NIE ma — na krok 3
+  seedujemy `B` tylko w kopii roboczej (patrz niżej); migracja wejdzie w kroku 4.
+
+Pozostaje (krok 4): migracja `B` + przełącznik „Wygeneruj" na solver za flagą.
+Mapowanie constraintów na walidator — patrz docstring w [`solve.py`](solve.py).
 
 ## Setup (jednorazowo)
 
@@ -46,6 +54,12 @@ Działa na **kopii roboczej** bazy, żeby nie dotykać produkcji:
 ```bash
 # 1. skopiuj produkcyjną bazę (z plikami WAL!) do kopii roboczej
 cp dist/data/vet-scheduler.db*  solver/.work/      # work.db, work.db-wal, work.db-shm
+
+# 1b. (krok 3) zaseeduj dyżur biurowy B w kopii roboczej — produkcja bez zmian
+bun -e 'import {Database} from "bun:sqlite"; const db=new Database("solver/.work/work.db"); \
+  if(!db.query("SELECT 1 FROM shift_definitions WHERE id=?").get("office-duty-b")) \
+  db.query(`INSERT INTO shift_definitions (id,staff_group,name,start_time,end_time,weekdays,required_min,required_max,staffs_reception) \
+  VALUES (?,?,?,?,?,?,?,?,?)`).run("office-duty-b","reception","Dyżur biurowy","07:30","15:30","[1,2,3,4,5,6,0]",0,2,0);'
 
 # 2. uruchom solver (tryb CLI/stdin) + walidację istniejącym walidatorem
 VET_DB_PATH="solver/.work/work.db" \
