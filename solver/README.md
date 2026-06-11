@@ -5,13 +5,22 @@ LLM (budowane przez [`server/src/solver/payload.ts`](../server/src/solver/payloa
 zwraca `assignments` w formacie `submit_schedule`, a istniejący walidator TS
 ocenia wynik niezależnie. Walidator i ścieżka LLM pozostają nietknięte.
 
-## Zakres kroku 1
+## Zakres (kroki 1–2 — zrobione)
 
-- twarde constrainty **C1–C6, bez slacków**,
-- funkcja celu: **wyłącznie odchyłka godzin od normy** (`W_hours`),
-- bez miękkich preferencji, próśb `preferred`, dni biurowych (kroki 2–4).
+- **Krok 1:** twarde constrainty C1–C6, cel = sama odchyłka godzin (`W_hours`).
+- **Krok 2:**
+  - **slack na C1** (obsada) z karą `W_slack=10000` — niewykonalny miesiąc zwraca
+    grafik + listę luk (`slacks`), nie gołe INFEASIBLE; zastępuje pre-check,
+  - pełny cel: `W_pref` (prośby preferowane), `W_weekend` (~2 weekendy/os.),
+    `W_shiftBalance` (poranne≈popołudniowe), `W_mid` (międzyzmiana oszczędnie),
+    `W_tue` (kierownik+zastępca nie na tej samej wtorkowej zmianie).
+- Wagi: `DEFAULT_WEIGHTS` w `server/src/solver/payload.ts` (hours 10, pref 8,
+  weekend 4, shiftBalance 2, mid 1, tue 1, slack 10000; `balance` = opcjonalna
+  sprawiedliwość max-nadwyżki godzin, domyślnie 0).
+- Norma godzin: dynamiczna, art. 130 KP (`norm.py`), nie stała 160.
 
-Mapowanie constraintów na walidator — patrz docstring w [`solve.py`](solve.py).
+Pozostaje (kroki 3–4): dni biurowe + przełącznik w UI. Mapowanie constraintów na
+walidator — patrz docstring w [`solve.py`](solve.py).
 
 ## Setup (jednorazowo)
 

@@ -92,13 +92,19 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         """work[e,d] as a 0/1 term (literal int 0 when the person has no var that day)."""
         return work.get((e, d), 0)
 
-    # ---- C1: coverage (hard, no slack) ----
+    # ---- C1: coverage, with a heavily-penalised slack on the minimum ----
+    # Slack (W_slack ~ 10000) lets a genuinely understaffed month still return a
+    # schedule instead of bare INFEASIBLE; slack > 0 pinpoints exactly where and
+    # how many people are missing. The max is still hard (never overstaff).
+    slack_vars = []  # (inst, slack_var)
     for inst in instances:
         d, s = inst["date"], inst["shiftDefId"]
         present = [x[(e, d, s)] for e in inst["eligible"] if (e, d, s) in x]
         total = sum(present) if present else 0
         if inst["effMin"] > 0:
-            m.Add(total >= inst["effMin"])
+            slack = m.NewIntVar(0, inst["effMin"], f"slack_{d}_{s}")
+            m.Add(total + slack >= inst["effMin"])
+            slack_vars.append((inst, slack))
         if present:
             m.Add(total <= inst["effMax"])
 
@@ -172,36 +178,109 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         if free_flags:
             m.Add(sum(free_flags) >= 1)
 
-    # ---- Objective: hours deviation from target (W_hours) + optional fairness ----
-    # All reception shifts are 8h, so |hours - target| == 8*|shifts - target_shifts|;
-    # we minimise the shift-count deviation (8*W_hours is a constant scale).
-    #
-    # W_hours alone (an L1 sum) is INDIFFERENT to how unavoidable over-target work
-    # is spread: piling +27 shifts on one person scores the same as +2-3 each. When
-    # `weights.balance` > 0 we also minimise the WORST single over-target deviation
-    # (max_over), which forces the overflow to spread evenly — the fairness a human
-    # planner applies by hand. This is the step-2 balance term, exposed early to
-    # answer "does anyone really have to carry the overtime?".
-    w_hours = payload["weights"]["hours"]
-    w_balance = payload["weights"].get("balance", 0)
-    dev_terms = []
-    over_terms = []
+    # ---- Objective: weighted soft rules (hard rules are constraints above) ----
+    # W_hours dominates; the rest shape a schedule a human would actually accept.
+    w = payload["weights"]
+    ND = len(days)
+    obj = []
+
+    def abs_dev(expr, target, name):
+        """|expr - target| via two non-negative deviation vars; returns the sum."""
+        pos = m.NewIntVar(0, ND, f"pos_{name}")
+        neg = m.NewIntVar(0, ND, f"neg_{name}")
+        m.Add(expr - target == pos - neg)
+        return pos + neg
+
+    # Per-employee shift vars by type (morning / afternoon / midshift).
+    morning = {d["id"] for d in payload["shiftDefs"] if d["startMin"] < 540}
+    afternoon = {d["id"] for d in payload["shiftDefs"] if d["startMin"] >= 780}
+    midshift = {d["id"] for d in payload["shiftDefs"] if 540 <= d["startMin"] < 780}
+
+    # W_hours — deviation from the art.130 target (+ optional max-over fairness).
+    hours_dev, over_terms = [], []
     for e in emp_ids:
-        e_vars = [v for (ee, _, _), v in x.items() if ee == e]
-        count = sum(e_vars) if e_vars else 0
-        tgt = target_shifts[e]
-        pos = m.NewIntVar(0, len(days), f"devpos_{e}")
-        neg = m.NewIntVar(0, len(days), f"devneg_{e}")
-        m.Add(count - tgt == pos - neg)
-        dev_terms.append(pos + neg)
+        count = sum(v for (ee, _, _), v in x.items() if ee == e)
+        pos = m.NewIntVar(0, ND, f"hpos_{e}")
+        neg = m.NewIntVar(0, ND, f"hneg_{e}")
+        m.Add(count - target_shifts[e] == pos - neg)
+        hours_dev.append(pos + neg)
         over_terms.append(pos)
-    obj = w_hours * sum(dev_terms)
-    if w_balance:
-        max_over = m.NewIntVar(0, len(days), "max_over")
+    obj.append(w["hours"] * sum(hours_dev))
+    if w.get("balance", 0):
+        max_over = m.NewIntVar(0, ND, "max_over")
         for p in over_terms:
             m.Add(max_over >= p)
-        obj = obj + w_balance * max_over
-    m.Minimize(obj)
+        obj.append(w["balance"] * max_over)
+
+    # W_slack — huge penalty so understaffing is a last resort.
+    if slack_vars:
+        obj.append(w["slack"] * sum(s for _, s in slack_vars))
+
+    # W_pref — one penalty per unmet `preferred` request. Satisfied if the person
+    # works one of the requested dates (on a requested shift when shiftDefIds set).
+    for idx, pref in enumerate(payload.get("preferred", [])):
+        e = pref["employeeId"]
+        want_shifts = set(pref["shiftDefIds"])
+        lits = []
+        for d in pref["dates"]:
+            for s in shift_ids:
+                if (e, d, s) in x and (not want_shifts or s in want_shifts):
+                    lits.append(x[(e, d, s)])
+        if not lits:
+            continue  # impossible to satisfy (e.g. blocked) — don't penalise phantom
+        met = m.NewBoolVar(f"pref_{idx}")
+        m.Add(sum(lits) >= 1).OnlyEnforceIf(met)
+        m.Add(sum(lits) == 0).OnlyEnforceIf(met.Not())
+        obj.append(w["pref"] * (1 - met))
+
+    # W_weekend — aim for ~2 worked weekends per person; penalise the deviation.
+    for e in emp_ids:
+        flags = []
+        for sat, sun in payload["weekends"]:
+            f = m.NewBoolVar(f"wkwork_{e}_{sat}")
+            m.Add(f >= work_var(e, sat))
+            m.Add(f >= work_var(e, sun))
+            m.Add(f <= work_var(e, sat) + work_var(e, sun))
+            flags.append(f)
+        if flags:
+            obj.append(w["weekend"] * abs_dev(sum(flags), 2, f"wk_{e}"))
+
+    # W_shiftBalance — keep each person's morning vs afternoon counts close.
+    for e in emp_ids:
+        cnt_r = sum(v for (ee, _, s), v in x.items() if ee == e and s in morning)
+        cnt_p = sum(v for (ee, _, s), v in x.items() if ee == e and s in afternoon)
+        diff_pos = m.NewIntVar(0, ND, f"sbpos_{e}")
+        diff_neg = m.NewIntVar(0, ND, f"sbneg_{e}")
+        m.Add(cnt_r - cnt_p == diff_pos - diff_neg)
+        obj.append(w["shiftBalance"] * (diff_pos + diff_neg))
+
+    # W_mid — use the optional midshift sparingly.
+    if midshift:
+        obj.append(w["mid"] * sum(v for (_, _, s), v in x.items() if s in midshift))
+
+    # W_tue — discourage manager (rank>=4) and deputy (rank==3) on the same shift
+    # on Tuesdays (so cover is spread across the week).
+    mgr = [e for e in emp_ids if rank_of.get(e, 0) >= 4]
+    dep = [e for e in emp_ids if rank_of.get(e, 0) == 3]
+    for d in payload.get("tuesdays", []):
+        for s in shift_ids:
+            mv = [x[(e, d, s)] for e in mgr if (e, d, s) in x]
+            dv = [x[(e, d, s)] for e in dep if (e, d, s) in x]
+            if not mv or not dv:
+                continue
+            mp = m.NewBoolVar(f"mgr_{d}_{s}")
+            dp = m.NewBoolVar(f"dep_{d}_{s}")
+            both = m.NewBoolVar(f"tue_{d}_{s}")
+            for v in mv:
+                m.Add(mp >= v)
+            m.Add(mp <= sum(mv))
+            for v in dv:
+                m.Add(dp >= v)
+            m.Add(dp <= sum(dv))
+            m.Add(both >= mp + dp - 1)
+            obj.append(w["tue"] * both)
+
+    m.Minimize(sum(obj))
 
     # ---- Solve ----
     solver = cp_model.CpSolver()
@@ -233,6 +312,12 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         cnt = sum(1 for a in assignments if a["employeeId"] == e)
         hours_per_emp[e] = cnt * SHIFT_HOURS
 
+    slacks = [
+        {"date": inst["date"], "shiftDefId": inst["shiftDefId"], "missing": int(solver.Value(sv))}
+        for inst, sv in slack_vars
+        if solver.Value(sv) > 0
+    ]
+
     return {
         "status": status_name,
         "assignments": assignments,
@@ -241,6 +326,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         "hoursPerEmployee": hours_per_emp,
         "targets": target_h,
         "normHours": monthly_norm_hours(year, month),
+        "slacks": slacks,
     }
 
 

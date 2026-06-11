@@ -78,6 +78,7 @@ const result = JSON.parse(out) as {
   hoursPerEmployee: Record<string, number>;
   targets: Record<string, number>;
   normHours: number;
+  slacks: { date: string; shiftDefId: string; missing: number }[];
 };
 
 console.log(`\n=== SOLVER RESULT ===`);
@@ -121,6 +122,39 @@ console.log(
       : `no forced overtime: targets absorb the whole coverage demand`) +
     `)`,
 );
+
+// ---- Soft outcomes (the point of step 2) ----
+console.log(`\n=== SOFT OUTCOMES (solver) ===`);
+
+// Preferred requests honoured (validator's own count is the arbiter).
+const totalPref = payload.preferred.length;
+console.log(
+  `Preferred requests: ${totalPref - solverV.unmetPreferences.length}/${totalPref} met ` +
+    `(LLM baseline met ${baseV ? totalPref - baseV.unmetPreferences.length : "n/a"}/${totalPref})`,
+);
+for (const u of solverV.unmetPreferences) console.log(`  unmet: ${u.message}`);
+
+// Coverage slacks (understaffing the solver couldn't fill).
+if (result.slacks.length === 0) console.log(`Coverage slacks: none (every shift fully staffed)`);
+else for (const s of result.slacks) console.log(`  SLACK ${s.date} ${defName.get(s.shiftDefId)}: −${s.missing} osoba`);
+
+// Worked-weekend distribution + morning/afternoon balance per person.
+const morning = new Set(payload.shiftDefs.filter((d) => d.startMin < 540).map((d) => d.id));
+const afternoon = new Set(payload.shiftDefs.filter((d) => d.startMin >= 780).map((d) => d.id));
+const worked = new Map<string, Set<string>>();
+const cntR = new Map<string, number>();
+const cntP = new Map<string, number>();
+for (const a of result.assignments) {
+  (worked.get(a.employeeId) ?? worked.set(a.employeeId, new Set()).get(a.employeeId)!).add(a.date);
+  if (morning.has(a.shiftDefId)) cntR.set(a.employeeId, (cntR.get(a.employeeId) ?? 0) + 1);
+  if (afternoon.has(a.shiftDefId)) cntP.set(a.employeeId, (cntP.get(a.employeeId) ?? 0) + 1);
+}
+console.log(`\nweekends worked / morning(R) / afternoon(P) per person:`);
+for (const e of payload.employees) {
+  const w = worked.get(e.id) ?? new Set();
+  const wk = payload.weekends.filter(([sa, su]) => w.has(sa) || w.has(su)).length;
+  console.log(`  ${empName.get(e.id)!.padEnd(24)} wk ${wk}  R ${cntR.get(e.id) ?? 0}  P ${cntP.get(e.id) ?? 0}`);
+}
 
 // ---- Verdict ----
 console.log(`\n=== VERDICT ===`);

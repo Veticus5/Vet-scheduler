@@ -56,10 +56,38 @@ export interface SolverPayload {
   consecutive: { maxDays: number; exemptEmployeeIds: string[]; carryIn: Record<string, number> };
   /** [saturday, sunday] pairs, both days in-month. */
   weekends: [string, string][];
+  /** Tuesdays in the month (for the manager+deputy-same-shift soft rule). */
+  tuesdays: string[];
   /** The qualification-coverage rule, if one is enabled (rank≥minLevel, ≥minCount). */
   qualification: { minLevel: number; minCount: number } | null;
-  weights: { hours: number };
+  /** `preferred` requests (soft): satisfied if the employee works one of `dates`
+   *  (on one of `shiftDefIds` when given). Each unmet request is penalised W_pref. */
+  preferred: { employeeId: string; dates: string[]; shiftDefIds: string[] }[];
+  /** Objective weights. W_hours dominates; W_slack is a huge penalty so coverage
+   *  slack is used only when a month is genuinely understaffed. `balance` is an
+   *  optional max-over-target hours-fairness term (0 = off). */
+  weights: {
+    hours: number;
+    pref: number;
+    weekend: number;
+    shiftBalance: number;
+    mid: number;
+    tue: number;
+    slack: number;
+    balance: number;
+  };
 }
+
+export const DEFAULT_WEIGHTS = {
+  hours: 10,
+  pref: 8,
+  weekend: 4,
+  shiftBalance: 2,
+  mid: 1,
+  tue: 1,
+  slack: 10000,
+  balance: 0,
+};
 
 export interface SolverBuildInput {
   month: string;
@@ -95,7 +123,7 @@ function addDays(iso: string, delta: number): string {
 export function buildSolverPayload(
   input: SolverBuildInput,
   tierRanks: Map<string, Map<string, number>>,
-  weightHours = 10,
+  weightOverrides: Partial<typeof DEFAULT_WEIGHTS> = {},
 ): SolverPayload {
   const { month } = input;
   const days = datesOfMonth(month);
@@ -228,6 +256,12 @@ export function buildSolverPayload(
     const sunday = addDays(date, 1);
     if (sunday <= days[days.length - 1]!) weekends.push([date, sunday]);
   }
+  const tuesdays = days.filter((d) => weekdayOf(d) === 2);
+
+  // ---- Preferred requests (soft) ----
+  const preferred = input.requests
+    .filter((r) => r.type === "preferred" && (r.dates?.length ?? 0) > 0)
+    .map((r) => ({ employeeId: r.employeeId, dates: r.dates ?? [], shiftDefIds: r.shiftDefIds ?? [] }));
 
   // ---- Qualification-coverage rule (rank≥minLevel, ≥minCount) ----
   const qualRule = input.rules.find((r) => r.enabled && r.kind === "qualification-coverage");
@@ -248,7 +282,9 @@ export function buildSolverPayload(
     boundary: { date: prevLastDay, perEmployeeStartMin },
     consecutive,
     weekends,
+    tuesdays,
     qualification,
-    weights: { hours: weightHours },
+    preferred,
+    weights: { ...DEFAULT_WEIGHTS, ...weightOverrides },
   };
 }
